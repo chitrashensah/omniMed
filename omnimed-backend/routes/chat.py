@@ -305,8 +305,19 @@ async def _call_openai_like(model_key, model_name, base_url, api_key,
             client.chat.completions.create(model=model_name, max_tokens=max_tokens, messages=messages),
             timeout=TIMEOUT,
         )
+        # OpenRouter/free tiers sometimes return an error-shaped body (HTTP 200 with
+        # choices=None or an embedded error) instead of raising. Handle gracefully.
+        choices = getattr(response, "choices", None)
+        if not choices:
+            err_obj = getattr(response, "error", None)
+            msg = ""
+            if isinstance(err_obj, dict):
+                msg = str(err_obj.get("message", "")).lower()
+            if "rate" in msg or "429" in msg or "limit" in msg:
+                return {"model": model_key, "status": "error", "error": "RATE_LIMIT", "usage": _usage()}
+            return {"model": model_key, "status": "error", "error": "MODEL_UNAVAILABLE", "usage": _usage()}
         return {"model": model_key, "status": "ok",
-                "text": response.choices[0].message.content, "usage": _openai_usage(response)}
+                "text": choices[0].message.content, "usage": _openai_usage(response)}
     except asyncio.TimeoutError:
         return {"model": model_key, "status": "TIMED_OUT", "error": "TIMEOUT", "usage": _usage()}
     except openai.AuthenticationError:
