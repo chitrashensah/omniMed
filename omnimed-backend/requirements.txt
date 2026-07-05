@@ -1,0 +1,10 @@
+flask
+flask-cors
+anthropic
+openai
+google-genai
+cohere
+supabase
+python-dotenv
+pymupdf
+python-docx

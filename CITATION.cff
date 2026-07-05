@@ -1,0 +1,34 @@
+cff-version: 1.2.0
+title: "OmniMed: A Multi-LLM Framework for Identifying Therapeutic microRNAs from Scientific Literature"
+message: "If you use this software in your research, please cite it as below."
+type: software
+authors:
+  - given-names: Chitrashen
+    family-names: Sah
+    affiliation: University of South Dakota
+    # After creating your ORCID at https://orcid.org, paste it here (keep the URL form):
+    # orcid: "https://orcid.org/0000-0000-0000-0000"
+abstract: >-
+  OmniMed is an open-source, AI-powered research framework that queries multiple
+  large language models in parallel to identify therapeutic microRNA (miRNA) and
+  non-coding RNA candidates for cardiovascular disease from scientific literature.
+  It synthesizes a consensus across models and scores each model against wet-lab
+  experimental outcomes to build a reliability profile over time.
+keywords:
+  - microRNA
+  - non-coding RNA
+  - cardiovascular disease
+  - large language models
+  - biomedical research
+  - multi-LLM
+license: MIT
+repository-code: "https://github.com/chitrashensah/omniMed"
+version: "1.0.0"
+date-released: "2026-07-05"
+# After Zenodo mints a DOI for your release, uncomment and paste it here.
+# This is what makes citations trackable by Google Scholar / Crossref:
+# doi: "10.5281/zenodo.XXXXXXX"
+# identifiers:
+#   - type: doi
+#     value: "10.5281/zenodo.XXXXXXX"
+#     description: "Concept DOI — always resolves to the latest release"

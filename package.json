@@ -1,0 +1,9 @@
+{
+  "name": "omnimed",
+  "private": true,
+  "scripts": {
+    "frontend": "npm run dev --prefix omnimed-frontend",
+    "backend": "cd omnimed-backend && source venv/bin/activate && python app.py",
+    "start": "npx concurrently --kill-others-on-fail --names \"BACKEND,FRONTEND\" --prefix-colors \"cyan,magenta\" \"npm run backend\" \"npm run frontend\""
+  }
+}
