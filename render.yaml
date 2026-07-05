@@ -1,0 +1,38 @@
+# Render Blueprint for the OmniMed Flask backend.
+# Deploy: push to GitHub, then on render.com → New → Blueprint → pick this repo.
+# Set the secret env vars (API keys) in the Render dashboard after the first deploy.
+services:
+  - type: web
+    name: omnimed-backend
+    runtime: python
+    rootDir: omnimed-backend
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    # 1 worker keeps the in-memory quota cache coherent; threads handle
+    # concurrent SSE streams; long timeout so model calls aren't killed mid-stream.
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 8 --timeout 300
+    envVars:
+      # Secrets — set these in the Render dashboard (marked sync:false so they
+      # are NOT committed to git).
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: DEEPSEEK_API_KEY
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: COHERE_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: ADMIN_EMAIL
+        sync: false

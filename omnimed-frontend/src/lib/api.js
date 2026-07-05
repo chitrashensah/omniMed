@@ -1,6 +1,8 @@
 import { supabase } from './supabase'
 
-export const API = 'http://localhost:5000'
+// Backend base URL. Set VITE_API_URL in production (e.g. the Render URL);
+// falls back to the local Flask dev server.
+export const API = import.meta.env.VITE_API_URL || 'http://localhost:5000'
 
 /**
  * fetch wrapper that attaches the current Supabase access token as a

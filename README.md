@@ -1,5 +1,8 @@
 # OmniMed — Multi-LLM Biomedical Research Framework
 
+[![DOI](https://zenodo.org/badge/1289877865.svg)](https://doi.org/10.5281/zenodo.21210783)
+&nbsp;[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 OmniMed is an open-source, AI-powered research assistant that queries **seven large
 language models in parallel** and helps researchers identify therapeutic microRNA (miRNA)
 and non-coding RNA (ncRNA) candidates for cardiovascular disease. Researchers compare the
@@ -281,15 +284,16 @@ score from real laboratory outcomes.
 If you use OmniMed in your research, please cite it. Citation metadata lives in
 [`CITATION.cff`](CITATION.cff) — GitHub renders a **"Cite this repository"** button from it.
 
-Once a versioned release is archived on [Zenodo](https://zenodo.org), a permanent **DOI**
-makes citations trackable by Google Scholar and Crossref:
+The archived release on [Zenodo](https://zenodo.org) has a permanent **DOI**, which makes
+citations trackable by Google Scholar and Crossref:
 
 ```
 Sah, C. (2026). OmniMed: A Multi-LLM Framework for Identifying Therapeutic
-microRNAs from Scientific Literature (v1.0.0). Zenodo. https://doi.org/10.5281/zenodo.XXXXXXX
+microRNAs from Scientific Literature. Zenodo. https://doi.org/10.5281/zenodo.21210783
 ```
 
-> Replace `XXXXXXX` with the DOI Zenodo assigns after your first GitHub release.
+> **DOI:** [10.5281/zenodo.21210783](https://doi.org/10.5281/zenodo.21210783) (concept DOI —
+> always resolves to the latest release).
 
 ---
 
