@@ -340,3 +340,48 @@
   gap: 14px;
   margin-top: 16px;
 }
+
+/* ══ Mobile (≤ 768px) ══ */
+@media (max-width: 768px) {
+  .admin-header {
+    height: auto;
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 10px 14px;
+    row-gap: 8px;
+  }
+  /* Nav scrolls horizontally instead of overflowing */
+  .admin-nav {
+    order: 3;
+    width: 100%;
+    flex: 1 1 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    gap: 2px;
+    padding-bottom: 2px;
+  }
+  .admin-nav::-webkit-scrollbar { height: 0; }
+  .admin-nav-link { padding: 6px 10px; font-size: 0.8rem; }
+  .admin-header-right { margin-left: auto; gap: 6px; }
+  .admin-user-email { display: none; }          /* too long for phones */
+  .admin-back-btn, .admin-signout-btn { padding: 5px 9px; font-size: 0.72rem; }
+
+  .admin-main { padding: 18px 14px; }
+  .admin-page-title { font-size: 1.2rem; }
+
+  /* Stat cards → single/short columns */
+  .admin-stat-grid { grid-template-columns: 1fr 1fr; gap: 10px; }
+  .admin-stat-value { font-size: 1.5rem; }
+
+  /* Section headers wrap so titles + buttons don't overflow */
+  .admin-section { padding: 16px 14px; }
+  .admin-section-header { flex-wrap: wrap; gap: 8px; }
+  .admin-filters { flex-wrap: wrap; width: 100%; }
+
+  /* Tables already scroll via .admin-table-wrap; tighten cells */
+  .admin-table th, .admin-table td { padding: 8px 10px; font-size: 0.78rem; }
+}
+
+@media (max-width: 440px) {
+  .admin-stat-grid { grid-template-columns: 1fr; }
+}

@@ -6,7 +6,9 @@ from routes.auth import require_auth
 
 upload_bp = Blueprint("upload", __name__)
 
-MAX_CHARS = 60_000  # ~15k tokens — safe for all models
+# Upload cap. RAG (chunk + retrieve) means large docs no longer bloat the prompt —
+# only relevant passages are sent per query — so we can index whole papers/reviews.
+MAX_CHARS = 250_000  # ~60k tokens of source text; RAG retrieves from it efficiently
 
 MIME_MAP = {
     "jpg": "image/jpeg",

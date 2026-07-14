@@ -11,7 +11,8 @@ from google.genai import types as genai_types
 from flask import Blueprint, request, jsonify, g, Response
 
 from routes.auth import require_auth
-from services import supabase_service
+from services import supabase_service, embedding_service
+from services import rag_service
 
 chat_bp = Blueprint("chat", __name__)
 
@@ -22,16 +23,19 @@ GEMINI_RETRY_WAIT = 15
 VALID_MODELS    = {"claude", "gpt4", "gemini", "deepseek", "groq", "qwen", "cohere"}
 GATED_MODELS    = {"claude", "gpt4"}   # require key or consume daily free quota
 FREE_LIMIT      = 5                     # messages/user/day on backend keys
-ADMIN_EMAIL     = os.getenv("ADMIN_EMAIL", "chitrashenshah@gmail.com")
+ADMIN_EMAILS    = [e.strip().lower() for e in
+                   (os.getenv("ADMIN_EMAILS") or os.getenv("ADMIN_EMAIL", "chitrashenshah@gmail.com")).split(",")
+                   if e.strip()]
 
 # In-memory caches (never persisted across restarts).
 # _quota_cache:  {(user_id, model): {"date": str, "blocked": bool}}  — per-model daily quota
 # _granted_cache:{user_id: {"date": str, "granted": bool}}           — admin-granted status
 _quota_cache: dict = {}
 _granted_cache: dict = {}
-# _session_docs_cache: {session_id: bool}  — whether a session has any documents,
-# so we can skip the get_documents() read on every message for doc-free sessions.
+# _session_docs_cache:   {session_id: bool}  — session has any documents at all
+# _session_chunks_cache: {session_id: bool}  — session has embedded chunks (RAG)
 _session_docs_cache: dict = {}
+_session_chunks_cache: dict = {}
 
 MAX_HISTORY_ITEMS = 12        # server-side cap (≈6 turns) regardless of client
 MAX_DOC_CONTEXT_CHARS = 80_000  # cap total injected document text
@@ -104,7 +108,7 @@ def _gated_blocked_models(user: dict, user_keys: dict, gated_requested: list) ->
     today      = date.today().isoformat()
 
     # Admin or granted → nothing blocked
-    if user_email == ADMIN_EMAIL:
+    if user_email.lower() in ADMIN_EMAILS:
         return set()
     if _is_granted_cached(user_id, today):
         return set()
@@ -144,10 +148,51 @@ def _usage(input_t=0, output_t=0, cache_read=0, cache_write=0) -> dict:
 
 # ── Document context (persistent session files, injected + cached) ──────────
 
-def _build_document_context(docs: list) -> str:
-    """Concatenate stored session documents into one framed, capped block."""
+def _build_document_context(docs: list, session_id: str | None = None, query: str = "") -> str:
+    """
+    Build the document context to inject for a query.
+
+    - No docs → empty.
+    - Small total (< RAG threshold) → send the whole document(s), prompt-cached.
+    - Large total → RAG: embed the query, retrieve only the most relevant chunks.
+      Falls back to truncated full text if retrieval is unavailable.
+    """
     if not docs:
         return ""
+
+    total_chars = sum(len((d.get("content") or "")) for d in docs)
+
+    # Large docs + a real question → retrieve just the relevant passages.
+    if (total_chars > rag_service.RAG_THRESHOLD_CHARS and session_id and query
+            and _session_chunks_cache.get(session_id) is not False):
+        retrieved = _retrieve_chunks(session_id, query)
+        if retrieved:
+            return (
+                "The most relevant passages from the uploaded document(s) for this "
+                "question are below. Use them as your primary reference:\n\n" + retrieved
+            )
+
+    # Otherwise send the full text (capped), letting prompt caching handle repetition.
+    return _full_document_context(docs)
+
+
+def _retrieve_chunks(session_id: str, query: str) -> str:
+    """Embed the query and return the top matching chunks as a framed block, or ''."""
+    try:
+        q_emb = embedding_service.embed_query(query)
+        if not q_emb:
+            return ""
+        chunks = supabase_service.match_document_chunks(session_id, q_emb, rag_service.TOP_K)
+        _session_chunks_cache[session_id] = bool(chunks)
+        if not chunks:
+            return ""
+        return "\n\n".join(f"[Passage {i+1}]\n{c}" for i, c in enumerate(chunks))
+    except Exception:
+        return ""
+
+
+def _full_document_context(docs: list) -> str:
+    """Concatenate whole documents into one framed, capped block (small-doc path)."""
     blocks, total = [], 0
     for d in docs:
         content = (d.get("content") or "").strip()
@@ -155,7 +200,7 @@ def _build_document_context(docs: list) -> str:
             continue
         block = f'=== FILE: {d.get("filename", "document")} ===\n{content}\n=== END FILE ==='
         if total + len(block) > MAX_DOC_CONTEXT_CHARS:
-            blocks.append("=== [additional documents truncated to conserve tokens] ===")
+            blocks.append("=== [additional document text truncated to conserve tokens] ===")
             break
         blocks.append(block)
         total += len(block)
@@ -194,8 +239,13 @@ def _build_full_message(message: str, text_atts: list) -> str:
 
 
 def _compose_system(system_prompt: str | None, doc_context: str) -> str | None:
-    """Stable system text (docs first so providers can prefix-cache it)."""
-    parts = [p for p in (doc_context, system_prompt) if p]
+    """
+    Compose the system text. The stable system prompt goes FIRST so it forms a
+    consistent cacheable prefix across turns; the document context (which varies
+    per query once RAG retrieval kicks in) goes last so it doesn't invalidate the
+    cached prefix.
+    """
+    parts = [p for p in (system_prompt, doc_context) if p]
     return "\n\n".join(parts) if parts else None
 
 
@@ -239,12 +289,15 @@ async def _call_claude(message, system_prompt, doc_context, history, image_atts,
         messages = [{"role": h["role"], "content": h["content"]} for h in _cap_history(history)]
         messages.append({"role": "user", "content": _build_user_content_claude(message, image_atts)})
 
-        # Cache the stable prefix: document context + biomedical system prompt.
+        # System prompt first (stable → cached across turns), document context
+        # last (varies per query with RAG → its own cache breakpoint). Both get
+        # cache_control so small stable docs still cache, while the system prompt
+        # stays cached even when retrieved passages change.
         system_blocks = []
-        if doc_context:
-            system_blocks.append({"type": "text", "text": doc_context, "cache_control": {"type": "ephemeral"}})
         if system_prompt:
             system_blocks.append({"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}})
+        if doc_context:
+            system_blocks.append({"type": "text", "text": doc_context, "cache_control": {"type": "ephemeral"}})
 
         kwargs = dict(
             model="claude-sonnet-4-6",
@@ -502,28 +555,34 @@ async def _run_model(model, message, system_prompt, doc_context, history, image_
 def _persist_and_load_docs(session_id, user, text_atts) -> list:
     """
     Store any freshly-attached text files on the session, then return all docs.
-    Skips the DB read for sessions known to have no documents (the common case),
-    avoiding a Supabase round-trip on every message.
+    Large docs are also chunked + embedded for RAG retrieval. Skips the DB read
+    for sessions known to have no documents (avoids a round-trip every message).
     """
     if not session_id:
         return []
 
+    user_id = (user or {}).get("id")
     new_docs = False
     for att in text_atts:
         extracted = (att.get("text") or "").strip()
-        if extracted:
-            new_docs = True
-            try:
-                supabase_service.save_document(
-                    session_id, (user or {}).get("id"),
-                    att.get("filename", "document"), att.get("file_type", "file"), extracted,
-                )
-            except Exception:
-                pass
+        if not extracted:
+            continue
+        new_docs = True
+        try:
+            supabase_service.save_document(
+                session_id, user_id,
+                att.get("filename", "document"), att.get("file_type", "file"), extracted,
+            )
+        except Exception:
+            pass
+        # Chunk + embed EVERY doc so retrieval can cover all of them — including a
+        # small doc that shares a session with a large one. Whether we actually
+        # retrieve vs. send whole is decided later by the session's TOTAL size.
+        _index_document(session_id, user_id, extracted)
+
     if new_docs:
         _session_docs_cache[session_id] = True
 
-    # Known to have no docs and none added now → skip the read entirely.
     if not new_docs and _session_docs_cache.get(session_id) is False:
         return []
 
@@ -533,6 +592,22 @@ def _persist_and_load_docs(session_id, user, text_atts) -> list:
         return docs
     except Exception:
         return []
+
+
+def _index_document(session_id: str, user_id: str | None, text: str) -> None:
+    """Chunk + embed a document and store its vectors. Best-effort — any failure
+    just means we fall back to sending the (truncated) full text instead."""
+    try:
+        chunks = rag_service.chunk_text(text)
+        if not chunks:
+            return
+        embeddings = embedding_service.embed_texts(chunks)
+        if not embeddings:
+            return
+        supabase_service.save_document_chunks(session_id, user_id, chunks, embeddings)
+        _session_chunks_cache[session_id] = True
+    except Exception:
+        pass
 
 
 def _log_usage(results: dict, session_id, user, mode):
@@ -663,9 +738,12 @@ def ask():
     text_atts  = [a for a in attachments if a.get("file_type") != "image"]
     image_atts = [a for a in attachments if a.get("file_type") == "image"]
 
-    full_message = _build_full_message(message, text_atts)
     docs = _persist_and_load_docs(session_id, user, text_atts)
-    doc_context = _build_document_context(docs)
+    doc_context = _build_document_context(docs, session_id, message)
+    # Docs are delivered via doc_context (persisted + retrieved). Only inline them
+    # into the message when there's no session to persist to — avoids sending the
+    # document text twice.
+    full_message = message if (session_id and docs) else _build_full_message(message, text_atts)
 
     # Streaming path: emit each model's result over SSE as it completes. Gated
     # quota checks happen inside the worker, concurrently with free models.

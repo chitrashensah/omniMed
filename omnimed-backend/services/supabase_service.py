@@ -173,3 +173,55 @@ def revoke_user_access(user_id: str) -> None:
         .delete() \
         .eq("user_id", user_id) \
         .execute()
+
+
+# ── RAG: document chunks + vector retrieval ────────────────────────────────
+
+def save_document_chunks(session_id: str, user_id: str | None,
+                         chunks: list[str], embeddings: list[list[float]]) -> None:
+    """Bulk-insert embedded chunks for a session. Best-effort; never raises."""
+    if not chunks or not embeddings or len(chunks) != len(embeddings):
+        return
+    rows = [
+        {
+            "session_id": session_id,
+            "user_id": user_id,
+            "chunk_index": i,
+            "content": chunk,
+            "embedding": emb,
+        }
+        for i, (chunk, emb) in enumerate(zip(chunks, embeddings))
+    ]
+    try:
+        _get_client().table("document_chunks").insert(rows).execute()
+    except Exception:
+        pass
+
+
+def match_document_chunks(session_id: str, query_embedding: list[float],
+                          k: int = 6) -> list[str]:
+    """Return the top-k most relevant chunk texts for a query via pgvector. []"""
+    try:
+        r = _get_client().rpc("match_document_chunks", {
+            "p_session_id": session_id,
+            "p_query_embedding": query_embedding,
+            "p_match_count": k,
+        }).execute()
+        return [row["content"] for row in (r.data or []) if row.get("content")]
+    except Exception:
+        return []
+
+
+# ── Research report: all wet-lab validations (admin) ───────────────────────
+
+def get_all_validations() -> list:
+    """All scored validations for the research report (admin, service role)."""
+    try:
+        r = _get_client().table("validations") \
+            .select("model, verdict, researcher_notes, submitted_by, created_at") \
+            .not_.is_("verdict", "null") \
+            .order("created_at", desc=False) \
+            .execute()
+        return r.data or []
+    except Exception:
+        return []

@@ -1,10 +1,11 @@
 -- OmniMed: Run this entire file in Supabase SQL Editor
 -- Safe to re-run multiple times
 --
--- ⚠ ADMIN EMAIL: this file grants full data access to a single admin email via
--- RLS policies and SECURITY DEFINER functions. Replace every occurrence of
--- 'chitrashenshah@gmail.com' below with your own admin email before running,
--- and set ADMIN_EMAIL (backend) / VITE_ADMIN_EMAIL (frontend) to the same value.
+-- ⚠ ADMIN EMAILS: this file grants full data access to admin emails via RLS
+-- policies + SECURITY DEFINER functions. Admins are listed as
+--   any(array['chitrashenshah@gmail.com','n.reed.alexander@gmail.com'])
+-- To change admins, edit that array everywhere below, and keep it in sync with
+-- ADMIN_EMAILS (backend, comma-separated) and VITE_ADMIN_EMAILS (frontend).
 
 -- ── User Quota (5/day PER gated model: Claude and GPT-4o separately) ──
 create table if not exists user_quota (
@@ -51,7 +52,7 @@ drop policy if exists "granted_users: own or admin" on granted_users;
 create policy "granted_users: own or admin" on granted_users
   for select using (
     auth.uid() = user_id
-    or (auth.jwt() ->> 'email') = 'chitrashenshah@gmail.com'
+    or (auth.jwt() ->> 'email') = any(array['chitrashenshah@gmail.com','n.reed.alexander@gmail.com'])
   );
 
 -- ── User Prompts Table ────────────────────────────────────
@@ -133,32 +134,32 @@ alter table profiles    enable row level security;
 create policy "sessions: own or admin" on sessions
   for all using (
     auth.uid() = user_id
-    or (auth.jwt() ->> 'email') = 'chitrashenshah@gmail.com'
+    or (auth.jwt() ->> 'email') = any(array['chitrashenshah@gmail.com','n.reed.alexander@gmail.com'])
   );
 
 create policy "extractions: own or admin" on extractions
   for all using (
     auth.uid() = user_id
-    or (auth.jwt() ->> 'email') = 'chitrashenshah@gmail.com'
+    or (auth.jwt() ->> 'email') = any(array['chitrashenshah@gmail.com','n.reed.alexander@gmail.com'])
   );
 
 create policy "comparisons: own or admin" on comparisons
   for all using (
     auth.uid() = user_id
-    or (auth.jwt() ->> 'email') = 'chitrashenshah@gmail.com'
+    or (auth.jwt() ->> 'email') = any(array['chitrashenshah@gmail.com','n.reed.alexander@gmail.com'])
   );
 
 create policy "validations: own or admin" on validations
   for all using (
     auth.uid() = user_id
-    or (auth.jwt() ->> 'email') = 'chitrashenshah@gmail.com'
+    or (auth.jwt() ->> 'email') = any(array['chitrashenshah@gmail.com','n.reed.alexander@gmail.com'])
   );
 
 -- Profiles: only admin can read all, users can read their own
 create policy "profiles: own or admin" on profiles
   for all using (
     auth.uid() = id
-    or (auth.jwt() ->> 'email') = 'chitrashenshah@gmail.com'
+    or (auth.jwt() ->> 'email') = any(array['chitrashenshah@gmail.com','n.reed.alexander@gmail.com'])
   );
 
 -- ══════════════════════════════════════════════════════════
@@ -184,7 +185,7 @@ drop policy if exists "documents: own or admin" on documents;
 create policy "documents: own or admin" on documents
   for all using (
     auth.uid() = user_id
-    or (auth.jwt() ->> 'email') = 'chitrashenshah@gmail.com'
+    or (auth.jwt() ->> 'email') = any(array['chitrashenshah@gmail.com','n.reed.alexander@gmail.com'])
   );
 
 -- ══════════════════════════════════════════════════════════
@@ -213,7 +214,7 @@ drop policy if exists "usage: own or admin" on usage_logs;
 create policy "usage: own or admin" on usage_logs
   for all using (
     auth.uid() = user_id
-    or (auth.jwt() ->> 'email') = 'chitrashenshah@gmail.com'
+    or (auth.jwt() ->> 'email') = any(array['chitrashenshah@gmail.com','n.reed.alexander@gmail.com'])
   );
 
 -- ══════════════════════════════════════════════════════════
@@ -275,7 +276,8 @@ returns table(model text, avg_score numeric, n bigint)
 language plpgsql security definer set search_path = public
 as $$
 begin
-  if (auth.jwt() ->> 'email') is distinct from 'chitrashenshah@gmail.com' then
+  if (auth.jwt() ->> 'email') is null
+     or not ((auth.jwt() ->> 'email') = any(array['chitrashenshah@gmail.com','n.reed.alexander@gmail.com'])) then
     raise exception 'not authorized';
   end if;
   return query
@@ -314,7 +316,8 @@ returns table(model text, calls bigint, input_tokens bigint, output_tokens bigin
 language plpgsql security definer set search_path = public
 as $$
 begin
-  if (auth.jwt() ->> 'email') is distinct from 'chitrashenshah@gmail.com' then
+  if (auth.jwt() ->> 'email') is null
+     or not ((auth.jwt() ->> 'email') = any(array['chitrashenshah@gmail.com','n.reed.alexander@gmail.com'])) then
     raise exception 'not authorized';
   end if;
   return query
@@ -328,7 +331,7 @@ begin
     where (p_from is null or u.created_at >= p_from)
       and (p_to   is null or u.created_at <= p_to)
     group by u.model
-    order by input_tokens desc;
+    order by sum(u.input_tokens) desc nulls last;
 end;
 $$;
 
@@ -358,5 +361,53 @@ drop policy if exists "messages: own or admin" on messages;
 create policy "messages: own or admin" on messages
   for all using (
     auth.uid() = user_id
-    or (auth.jwt() ->> 'email') = 'chitrashenshah@gmail.com'
+    or (auth.jwt() ->> 'email') = any(array['chitrashenshah@gmail.com','n.reed.alexander@gmail.com'])
   );
+
+-- ══════════════════════════════════════════════════════════
+--  Step 12: RAG — document chunks + vector search (pgvector).
+--  Large uploaded documents are chunked, embedded (OpenAI
+--  text-embedding-3-small, 1536 dims), and stored here. On each
+--  query we retrieve only the most relevant chunks instead of
+--  injecting the whole document — big token/cost savings.
+-- ══════════════════════════════════════════════════════════
+create extension if not exists vector;
+
+create table if not exists document_chunks (
+  id          uuid primary key default gen_random_uuid(),
+  session_id  text,
+  user_id     uuid references auth.users(id) on delete set null,
+  chunk_index int,
+  content     text,
+  embedding   vector(1536),
+  created_at  timestamptz default now()
+);
+create index if not exists document_chunks_session_idx on document_chunks(session_id);
+-- Approx-nearest-neighbour index for fast cosine similarity search.
+create index if not exists document_chunks_embedding_idx
+  on document_chunks using hnsw (embedding vector_cosine_ops);
+
+alter table document_chunks enable row level security;
+drop policy if exists "document_chunks: own or admin" on document_chunks;
+create policy "document_chunks: own or admin" on document_chunks
+  for all using (
+    auth.uid() = user_id
+    or (auth.jwt() ->> 'email') = any(array['chitrashenshah@gmail.com','n.reed.alexander@gmail.com'])
+  );
+
+-- Cosine-similarity retrieval, scoped to a session. Called from the backend
+-- (service role) via supabase.rpc('match_document_chunks', ...).
+create or replace function match_document_chunks(
+  p_session_id     text,
+  p_query_embedding vector(1536),
+  p_match_count    int default 6
+)
+returns table(content text, similarity float)
+language sql stable
+as $$
+  select content, 1 - (embedding <=> p_query_embedding) as similarity
+  from document_chunks
+  where session_id = p_session_id
+  order by embedding <=> p_query_embedding
+  limit p_match_count;
+$$;

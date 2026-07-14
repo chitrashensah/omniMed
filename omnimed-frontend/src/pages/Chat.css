@@ -931,8 +931,25 @@
 
   .chat-inputbar { padding: 8px 12px 12px; }
 
-  .model-selector { gap: 3px; }
-  .model-toggle { font-size: 0.625rem; padding: 3px 7px; }
+  /* Reflow the crowded input row into readable rows on phones:
+     [attach] [prompt]  /  [model toggles — scroll]  /  [textarea] [send] */
+  .chat-input-wrap { flex-wrap: wrap; align-items: center; }
+  .chat-attach-btn { order: 1; }
+  .prompt-selector { order: 2; }
+  .model-selector {
+    order: 3;
+    width: 100%;
+    gap: 3px;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    padding-bottom: 2px;
+  }
+  .model-selector::-webkit-scrollbar { display: none; }
+  .model-toggle { font-size: 0.625rem; padding: 3px 7px; flex-shrink: 0; }
+  .chat-textarea { order: 4; flex: 1 1 60%; }
+  .chat-send-btn, .chat-stop-btn { order: 5; }
 
   .chat-att-pills { justify-content: flex-start; }
 

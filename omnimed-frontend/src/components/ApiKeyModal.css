@@ -236,3 +236,24 @@
   padding-top: 12px;
   margin-top: auto;
 }
+
+/* ── Mobile: stack tabs above content ── */
+@media (max-width: 640px) {
+  .apikey-modal { max-height: 92vh; }
+  .apikey-body { flex-direction: column; overflow: auto; }
+  .apikey-tabs {
+    width: 100%;
+    flex-direction: row;
+    overflow-x: auto;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    padding: 8px;
+  }
+  .apikey-tabs::-webkit-scrollbar { display: none; }
+  .apikey-tab { white-space: nowrap; flex-shrink: 0; }
+  .apikey-content { padding: 18px 16px; }
+  .apikey-input-row { flex-wrap: wrap; }
+  .apikey-input-row .apikey-input-wrap { flex: 1 1 100%; }
+}

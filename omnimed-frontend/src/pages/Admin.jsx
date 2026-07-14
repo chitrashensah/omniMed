@@ -1,11 +1,12 @@
 import { useEffect } from 'react'
 import { Routes, Route, NavLink, Navigate, useNavigate } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
-import Overview      from './admin/Overview'
-import Reliability   from './admin/Reliability'
-import Usage         from './admin/Usage'
-import Users         from './admin/Users'
-import GrantedUsers  from './admin/GrantedUsers'
+import Overview       from './admin/Overview'
+import Reliability    from './admin/Reliability'
+import ResearchReport from './admin/ResearchReport'
+import Usage          from './admin/Usage'
+import Users          from './admin/Users'
+import GrantedUsers   from './admin/GrantedUsers'
 import Logo        from '../components/Logo.jsx'
 import './Admin.css'
 
@@ -29,6 +30,7 @@ export default function Admin() {
         <nav className="admin-nav">
           <NavLink to="/admin/overview"     className={({ isActive }) => `admin-nav-link ${isActive ? 'admin-nav-link--active' : ''}`}>Overview</NavLink>
           <NavLink to="/admin/reliability"  className={({ isActive }) => `admin-nav-link ${isActive ? 'admin-nav-link--active' : ''}`}>Model Reliability</NavLink>
+          <NavLink to="/admin/report"        className={({ isActive }) => `admin-nav-link ${isActive ? 'admin-nav-link--active' : ''}`}>Research Report</NavLink>
           <NavLink to="/admin/usage"         className={({ isActive }) => `admin-nav-link ${isActive ? 'admin-nav-link--active' : ''}`}>Usage & Cost</NavLink>
           <NavLink to="/admin/users"         className={({ isActive }) => `admin-nav-link ${isActive ? 'admin-nav-link--active' : ''}`}>Users</NavLink>
           <NavLink to="/admin/access"        className={({ isActive }) => `admin-nav-link ${isActive ? 'admin-nav-link--active' : ''}`}>Access Control</NavLink>
@@ -45,6 +47,7 @@ export default function Admin() {
           <Route path="/"            element={<Navigate to="overview" replace />} />
           <Route path="overview"     element={<Overview />} />
           <Route path="reliability"  element={<Reliability />} />
+          <Route path="report"       element={<ResearchReport />} />
           <Route path="usage"        element={<Usage />} />
           <Route path="users"        element={<Users />} />
           <Route path="access"       element={<GrantedUsers />} />

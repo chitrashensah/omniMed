@@ -2,7 +2,10 @@ import { createContext, useContext, useEffect, useState } from 'react'
 import { supabase } from '../lib/supabase'
 
 const AuthContext = createContext(null)
-const ADMIN_EMAIL = import.meta.env.VITE_ADMIN_EMAIL || 'chitrashenshah@gmail.com'
+// Comma-separated admin emails (VITE_ADMIN_EMAILS), or legacy single VITE_ADMIN_EMAIL.
+const ADMIN_EMAILS = (import.meta.env.VITE_ADMIN_EMAILS || import.meta.env.VITE_ADMIN_EMAIL || 'chitrashenshah@gmail.com')
+  .split(',').map(e => e.trim().toLowerCase()).filter(Boolean)
+const isAdminEmail = (email) => !!email && ADMIN_EMAILS.includes(email.toLowerCase())
 
 export function AuthProvider({ children }) {
   const [user, setUser]         = useState(null)
@@ -28,7 +31,7 @@ export function AuthProvider({ children }) {
 
   async function checkGranted(u) {
     if (!u) return
-    if (u.email === ADMIN_EMAIL) { setIsGranted(true); return }
+    if (isAdminEmail(u.email)) { setIsGranted(true); return }
     try {
       const { data } = await supabase
         .from('granted_users')
@@ -41,7 +44,7 @@ export function AuthProvider({ children }) {
     }
   }
 
-  const isAdmin = !!(user && user.email === ADMIN_EMAIL)
+  const isAdmin = isAdminEmail(user?.email)
   // Whether the user can use Claude/GPT-4o without their own key
   const hasBackendAccess = !!(user && (isAdmin || isGranted))
 
