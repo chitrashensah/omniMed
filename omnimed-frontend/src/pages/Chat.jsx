@@ -1,26 +1,58 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 import { supabase } from '../lib/supabase'
 import { authedFetch, postJSON, askStream } from '../lib/api'
 import * as chatStore from '../lib/chatStore'
 import DOMPurify from 'dompurify'
-import Logo from '../components/Logo.jsx'
 import PromptSelector from '../components/PromptSelector.jsx'
 import ApiKeyModal from '../components/ApiKeyModal.jsx'
 import { BUILTIN_PROMPTS } from '../data/builtinPrompts.js'
 import { buildUserKeys, modelHasKey } from '../lib/apiKeys.js'
+import * as verifyStore from '../lib/verifyStore.js'
 import './Chat.css'
 
+// Keys are permanent identifiers — they are stored in `validations.model` and in
+// cached conversations, so never rename one or point it at a different model.
+// `gated` mirrors GATED_MODELS in the backend: metered at 5/day on the project's
+// keys unless the user supplies their own.
 const MODELS = [
-  { key: 'gemini',   label: 'Gemini 2.5 Flash',   color: '#b45309', bg: '#fef3c7' },
-  { key: 'deepseek', label: 'DeepSeek V3',         color: '#0369a1', bg: '#e0f2fe' },
-  { key: 'groq',     label: 'Groq Llama 3.3',      color: '#7c3aed', bg: '#f3e8ff' },
-  { key: 'qwen',     label: 'Qwen 2.5 72B',        color: '#be185d', bg: '#fce7f3' },
-  { key: 'cohere',   label: 'Cohere Command R+',   color: '#0f766e', bg: '#ccfbf1' },
-  { key: 'claude',   label: 'Claude Sonnet 4.6',   color: '#6d28d9', bg: '#ede9fe' },
-  { key: 'gpt4',     label: 'GPT-4o',              color: '#15803d', bg: '#dcfce7' },
+  // Anthropic
+  { key: 'opus55',  label: 'Claude Opus 5.5',    group: 'Anthropic', gated: true, color: '#6d28d9', bg: '#ede9fe' },
+  { key: 'opus5',   label: 'Claude Opus 5',      group: 'Anthropic', gated: true, color: '#6d28d9', bg: '#ede9fe' },
+  { key: 'fable51', label: 'Claude Fable 5.1',   group: 'Anthropic', gated: true, color: '#7e22ce', bg: '#f3e8ff' },
+  { key: 'fable5',  label: 'Claude Fable 5',     group: 'Anthropic', gated: true, color: '#7e22ce', bg: '#f3e8ff' },
+  { key: 'opus48',  label: 'Claude Opus 4.8',    group: 'Anthropic', gated: true, color: '#5b21b6', bg: '#ede9fe' },
+  { key: 'sonnet55',label: 'Claude Sonnet 5.5',  group: 'Anthropic', gated: true, color: '#7c3aed', bg: '#f5f3ff' },
+  { key: 'sonnet5', label: 'Claude Sonnet 5',    group: 'Anthropic', gated: true, color: '#7c3aed', bg: '#f5f3ff' },
+  { key: 'claude',  label: 'Claude Sonnet 4.6',  group: 'Anthropic', gated: true, color: '#8b5cf6', bg: '#f5f3ff' },
+  // OpenAI
+  { key: 'gpt6astra', label: 'GPT-6 Astra',      group: 'OpenAI', gated: true, color: '#15803d', bg: '#dcfce7' },
+  { key: 'gpt61sol',  label: 'GPT-6.1 Sol',      group: 'OpenAI', gated: true, color: '#15803d', bg: '#dcfce7' },
+  { key: 'gpt56sol',  label: 'GPT-5.6 Sol',      group: 'OpenAI', gated: true, color: '#166534', bg: '#dcfce7' },
+  { key: 'gpt55',     label: 'GPT-5.5',          group: 'OpenAI', gated: true, color: '#166534', bg: '#dcfce7' },
+  { key: 'gpt54mini', label: 'GPT-5.4 mini',     group: 'OpenAI', gated: true, color: '#047857', bg: '#d1fae5' },
+  // DeepSeek — Pro only. deepseek-flash is still listed by their API but did
+  // not answer a one-line prompt within the full 300s timeout on repeated
+  // attempts, so offering it would just hang a box.
+  { key: 'deepseek_pro',   label: 'DeepSeek V4 Pro',   group: 'DeepSeek', color: '#0369a1', bg: '#e0f2fe' },
+  // Google
+  { key: 'gemini38', label: 'Gemini 3.8 Flash',  group: 'Google', color: '#b45309', bg: '#fef3c7' },
+  { key: 'gemini36', label: 'Gemini 3.6 Flash',  group: 'Google', color: '#b45309', bg: '#fef3c7' },
+  { key: 'gemini35', label: 'Gemini 3.5 Flash',  group: 'Google', color: '#a16207', bg: '#fef9c3' },
+  { key: 'gemini',   label: 'Gemini 2.5 Flash',  group: 'Google', color: '#ca8a04', bg: '#fef3c7' },
+  // Qwen
+  { key: 'qwen38flash', label: 'Qwen 3.8 Flash', group: 'Qwen', color: '#be185d', bg: '#fce7f3' },
+  { key: 'qwen38max',   label: 'Qwen 3.8 Max',   group: 'Qwen', color: '#be185d', bg: '#fce7f3' },
+  { key: 'qwen37plus',  label: 'Qwen 3.7 Plus',  group: 'Qwen', color: '#db2777', bg: '#fce7f3' },
+  { key: 'qwen36flash', label: 'Qwen 3.6 Flash', group: 'Qwen', color: '#9d174d', bg: '#fce7f3' },
+  { key: 'qwen',        label: 'Qwen 2.5 72B',   group: 'Qwen', color: '#a21caf', bg: '#fae8ff' },
+  // Other providers
+  { key: 'groq',    label: 'Groq GPT-OSS 120B',  group: 'Other', color: '#c2410c', bg: '#ffedd5' },
+  { key: 'cohere',  label: 'Cohere Command A+',  group: 'Other', color: '#0f766e', bg: '#ccfbf1' },
 ]
+
+const MODEL_GROUPS = ['Anthropic', 'OpenAI', 'DeepSeek', 'Google', 'Qwen', 'Other']
 
 const MODES = [
   { key: 'normal',     label: 'Normal',     icon: '💬', desc: 'Plain chat — no system prompt' },
@@ -33,6 +65,55 @@ function newSessionId() {
 
 function convKey(userId)       { return `omnimed_conversations_${userId}` }
 function msgKey(userId, id)    { return `omnimed_msgs_${userId}_${id}` }
+
+// Which model sits in which box. Persisted so a reload keeps the workspace.
+const BOX_KEY = 'omnimed_box_models'
+const DEFAULT_BOXES = ['gemini38', 'deepseek_pro', 'groq', 'qwen38flash', 'cohere']
+const MAX_BOXES = 5
+
+function loadBoxModels() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(BOX_KEY))
+    const valid = Array.isArray(saved)
+      ? saved.filter(k => MODELS.some(m => m.key === k))
+      : []
+    return valid.length ? valid.slice(0, MAX_BOXES) : DEFAULT_BOXES
+  } catch { return DEFAULT_BOXES }
+}
+
+// Literature options offered per model. Presentational for now — selecting one
+// records the choice but nothing is sent to the backend yet.
+const DATABASES = [
+  { key: 'pubmed',    label: 'PubMed' },
+  { key: 'europepmc', label: 'Europe PMC' },
+  { key: 'none',      label: 'No database' },
+]
+
+const DATE_RANGES = [
+  { key: '1y',   label: 'Past year' },
+  { key: '5y',   label: 'Past 5 years' },
+  { key: '10y',  label: 'Past 10 years' },
+  { key: 'all',  label: 'Any time' },
+]
+
+// Per-model options, keyed by model key.
+const OPTS_KEY = 'omnimed_model_opts'
+
+function loadModelOpts() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(OPTS_KEY))
+    return saved && typeof saved === 'object' ? saved : {}
+  } catch { return {} }
+}
+
+// Column count for the fixed grid, including the conclusion box. Keeps boxes
+// wide enough to read prose: 3 columns on a laptop is ~370px per box, which is
+// about 50 characters a line. More columns than this stops being readable.
+function gridCols(total) {
+  if (total <= 2) return total
+  if (total <= 4) return 2
+  return 3
+}
 
 function saveConversation(userId, id, title, messages) {
   try {
@@ -78,7 +159,9 @@ function safeHtml(text) {
 }
 
 function exportCSV(messages, sessionId) {
-  const headers = ['Turn','Role','Mode','User Message','Claude Sonnet 4.6','GPT-4o','Gemini 2.5 Flash','Conclusion']
+  // One column per model rather than a fixed trio — the old hard-coded three
+  // silently dropped every other model's answer from the export.
+  const headers = ['Turn','Role','Mode','User Message', ...MODELS.map(m => m.label), 'Conclusion']
   const rows = [headers]
   let turn = 0
   for (let i = 0; i < messages.length; i++) {
@@ -91,10 +174,8 @@ function exportCSV(messages, sessionId) {
         'User',
         msg.mode || '',
         msg.content || '',
-        next?.responses?.claude?.text  || '',
-        next?.responses?.gpt4?.text    || '',
-        next?.responses?.gemini?.text  || '',
-        next?.conclusion               || '',
+        ...MODELS.map(m => next?.responses?.[m.key]?.text || ''),
+        next?.conclusion || '',
       ])
     }
   }
@@ -163,214 +244,932 @@ const WL_SCORE_COLOR = (score) => {
 const isUuid = (s) => typeof s === 'string' &&
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)
 
-function ModelPanel({ model, response, loading, msgId, sessionId }) {
-  const isLoading  = loading || !response
-  const isStopped  = response?.status === 'stopped'
-  const isError    = response?.status === 'error' || response?.status === 'TIMED_OUT'
-  const [copied, setCopied] = useState(false)
+// ── Wet-lab scoring ────────────────────────────────────────────────────────
+// Attached to an individual response rather than to the box. A box now holds
+// every turn for one model, so a single control in the header would be
+// ambiguous about which answer it scores. The persisted key is unchanged —
+// (session, msg, model) is already the natural key of the `validations` table.
+function WetLabScore({ modelKey, msgId, sessionId, disabled }) {
   const { user } = useAuth()
+  const storageKey = `omnimed_wlscore_${msgId}_${modelKey}`
 
-  const storageKey = `omnimed_wlscore_${msgId}_${model.key}`
-  const [wlScore, setWlScore]     = useState(() => {
+  const [score, setScore]     = useState(() => {
     try { return JSON.parse(localStorage.getItem(storageKey)) } catch { return null }
   })
-  const [wlOpen, setWlOpen]       = useState(false)
-  const [wlPending, setWlPending] = useState(null)
-  const [wlNotes, setWlNotes]     = useState('')
-  const [wlSaving, setWlSaving]   = useState(false)
+  const [open, setOpen]       = useState(false)
+  const [pending, setPending] = useState(null)
+  const [notes, setNotes]     = useState('')
+  const [saving, setSaving]   = useState(false)
 
   function openScorer() {
-    setWlPending(wlScore?.verdict || null)
-    setWlNotes(wlScore?.notes || '')
-    setWlOpen(true)
+    setPending(score?.verdict || null)
+    setNotes(score?.notes || '')
+    setOpen(true)
   }
 
   async function saveScore() {
-    if (!wlPending) return
-    setWlSaving(true)
-    const entry = { verdict: wlPending, notes: wlNotes.trim(), savedAt: Date.now() }
+    if (!pending) return
+    setSaving(true)
+    const entry = { verdict: pending, notes: notes.trim(), savedAt: Date.now() }
 
-    // Upsert on the natural key (session, message, model) so re-scoring updates
-    // the same row instead of inserting duplicates that skew reliability averages.
+    // Upsert on the natural key so re-scoring updates the same row instead of
+    // inserting duplicates that would skew reliability averages.
     const { error } = await supabase.from('validations').upsert({
       session_id:          isUuid(sessionId) ? sessionId : null,
       user_id:             user?.id    || null,
       submitted_by:        user?.email || null,
       msg_id:              String(msgId),
-      model:               model.key,
-      verdict:             String(wlPending),
-      researcher_notes:    wlNotes.trim() || null,
-      updated_reliability: { [model.key]: wlPending / 10 },
+      model:               modelKey,
+      verdict:             String(pending),
+      researcher_notes:    notes.trim() || null,
+      updated_reliability: { [modelKey]: pending / 10 },
     }, { onConflict: 'session_id,msg_id,model' })
 
     if (error) console.error('[WetLab] Supabase upsert error:', error)
 
     localStorage.setItem(storageKey, JSON.stringify(entry))
-    setWlScore(entry)
-    setWlSaving(false)
-    setWlOpen(false)
+    setScore(entry)
+    setSaving(false)
+    setOpen(false)
   }
 
   async function clearScore() {
-    // Remove the persisted row too, so a cleared score doesn't linger in the data.
     if (isUuid(sessionId)) {
       await supabase.from('validations')
         .delete()
-        .match({ session_id: sessionId, msg_id: String(msgId), model: model.key })
+        .match({ session_id: sessionId, msg_id: String(msgId), model: modelKey })
     }
     localStorage.removeItem(storageKey)
-    setWlScore(null)
-    setWlOpen(false)
+    setScore(null)
+    setOpen(false)
   }
 
-  const scoreNum   = wlScore?.verdict ? Number(wlScore.verdict) : null
+  const scoreNum   = score?.verdict ? Number(score.verdict) : null
   const scoreColor = scoreNum ? WL_SCORE_COLOR(scoreNum) : null
 
-  function copyText() {
-    const text = response?.text || ''
-    navigator.clipboard.writeText(text).then(() => {
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
-    })
-  }
-
   return (
-    <div className="model-panel">
-      <div className="model-panel-header" style={{ borderColor: model.color }}>
-        <span className="model-panel-badge" style={{ background: model.bg, color: model.color }}>
-          {model.label}
-        </span>
-        {isLoading  && <span className="model-panel-status">thinking…</span>}
-        {isStopped  && <span className="model-panel-status" style={{ color: '#f59e0b' }}>■ stopped</span>}
-        {isError    && <span className="model-panel-status model-panel-status--error">{response?.error || 'error'}</span>}
-        {!isLoading && !isError && !isStopped && (
-          <button className="model-panel-copy" onClick={copyText} title="Copy response">
-            {copied ? '✓' : '⎘'}
-          </button>
-        )}
+    <>
+      <button
+        className="wl-score-btn wl-score-btn--inline"
+        style={scoreNum ? { color: scoreColor, borderColor: scoreColor, background: `${scoreColor}18` } : {}}
+        onClick={openScorer}
+        title="Submit Wet Lab Score"
+        disabled={disabled}
+      >
+        {scoreNum ? `🔬 ${scoreNum}/10` : '🔬 Score'}
+      </button>
 
-        <button
-          className="wl-score-btn"
-          style={scoreNum ? { color: scoreColor, borderColor: scoreColor, background: `${scoreColor}18` } : {}}
-          onClick={openScorer}
-          title="Submit Wet Lab Score"
-          disabled={isLoading}
-        >
-          {scoreNum ? `🔬 ${scoreNum}/10` : '🔬 Wet Lab Score'}
-        </button>
-      </div>
-
-      {wlOpen && (
+      {open && (
         <div className="wl-scorer">
           <p className="wl-scorer-label">Rate this model (1 = poor, 10 = perfect)</p>
           <div className="wl-score-grid">
             {WL_SCORES.map(n => (
               <button
                 key={n}
-                className={`wl-score-num ${wlPending === n ? 'wl-score-num--active' : ''}`}
-                style={wlPending === n ? { background: WL_SCORE_COLOR(n), color: '#fff', borderColor: WL_SCORE_COLOR(n) } : {}}
-                onClick={() => setWlPending(n)}
+                className={`wl-score-num ${pending === n ? 'wl-score-num--active' : ''}`}
+                style={pending === n ? { background: WL_SCORE_COLOR(n), color: '#fff', borderColor: WL_SCORE_COLOR(n) } : {}}
+                onClick={() => setPending(n)}
               >
                 {n}
               </button>
             ))}
           </div>
-          {wlPending && (
-            <p className="wl-score-hint" style={{ color: WL_SCORE_COLOR(wlPending) }}>
-              {wlPending >= 8 ? 'Strong — prediction well supported by lab results' :
-               wlPending >= 5 ? 'Moderate — partially correct or missing nuance' :
+          {pending && (
+            <p className="wl-score-hint" style={{ color: WL_SCORE_COLOR(pending) }}>
+              {pending >= 8 ? 'Strong — prediction well supported by lab results' :
+               pending >= 5 ? 'Moderate — partially correct or missing nuance' :
                'Weak — prediction poorly matched lab results'}
             </p>
           )}
           <textarea
             className="wl-notes"
             placeholder="Optional notes (e.g. which experiment validated this)…"
-            value={wlNotes}
-            onChange={e => setWlNotes(e.target.value)}
+            value={notes}
+            onChange={e => setNotes(e.target.value)}
             rows={2}
           />
           <div className="wl-scorer-actions">
-            {wlScore && <button className="wl-btn wl-btn--clear" onClick={clearScore}>Clear</button>}
-            <button className="wl-btn wl-btn--cancel" onClick={() => setWlOpen(false)}>Cancel</button>
-            <button className="wl-btn wl-btn--save" onClick={saveScore} disabled={!wlPending || wlSaving}>
-              {wlSaving ? 'Saving…' : 'Save Score'}
+            {score && <button className="wl-btn wl-btn--clear" onClick={clearScore}>Clear</button>}
+            <button className="wl-btn wl-btn--cancel" onClick={() => setOpen(false)}>Cancel</button>
+            <button className="wl-btn wl-btn--save" onClick={saveScore} disabled={!pending || saving}>
+              {saving ? 'Saving…' : 'Save Score'}
             </button>
           </div>
         </div>
       )}
+    </>
+  )
+}
 
-      <div className="model-panel-body">
-        {isLoading ? (
-          <div className="model-panel-loading">
-            <span className="dot-pulse" />
-            <span className="dot-pulse" style={{ animationDelay: '0.2s' }} />
-            <span className="dot-pulse" style={{ animationDelay: '0.4s' }} />
-          </div>
-        ) : isStopped ? (
-          <p className="model-panel-error" style={{ color: '#f59e0b' }}>
-            Response stopped by user.
+// ── Citation check ─────────────────────────────────────────────────────────
+// On-demand verification of every PMID/DOI in an answer, against PubMed and
+// Crossref. Two independent failure modes are reported separately because they
+// mean different things:
+//   fabricated  — the identifier does not exist
+//   unsupported — the identifier is real but the paper is not about the claim.
+// The second passes a naive existence check, so a model can look perfectly
+// sourced while citing unrelated work. Observed in testing: an answer with
+// three real PMIDs, none of them about the miRNA being discussed.
+function CitationCheck({ text, disabled, sessionId, msgId, modelKey, auto = true }) {
+  // A previous check for this exact answer is reused rather than re-run —
+  // verification is deterministic, so a second call to PubMed would only
+  // return the same answer more slowly.
+  const cached = (sessionId && msgId && modelKey)
+    ? verifyStore.getResult(sessionId, msgId, modelKey) : null
+
+  const [state, setState] = useState(cached ? 'done' : 'idle')  // idle|loading|done|error
+  const [result, setResult] = useState(cached)
+  const [open, setOpen] = useState(false)
+  const started = useRef(!!cached)
+
+  const check = useCallback(async () => {
+    if (started.current) return
+    started.current = true
+    setState('loading')
+    try {
+      const data = await postJSON('/literature/verify-citations', { text })
+      if (data?.status === 'ok') {
+        setResult(data)
+        setState('done')
+        if (sessionId && msgId && modelKey) {
+          verifyStore.setResult(sessionId, msgId, modelKey, data)
+        }
+        return data
+      }
+      setState('error')
+      started.current = false          // allow a retry
+    } catch {
+      setState('error')
+      started.current = false
+    }
+    return null
+  }, [text, sessionId, msgId, modelKey])
+
+  // Checking costs no tokens — it is PubMed and Crossref, not a model — so it
+  // runs on its own. Waiting for a click meant an answer's citations were only
+  // ever checked if someone remembered to ask, which left the per-model
+  // accuracy figures full of holes.
+  useEffect(() => {
+    if (auto && !disabled && !started.current && (text || '').trim()) check()
+  }, [auto, disabled, text, check])
+
+  async function run() {
+    if (state === 'loading') return
+    if (result) { setOpen(o => !o); return }    // already checked — just toggle
+    const data = await check()
+    if (data) setOpen(true)
+  }
+
+  const label = () => {
+    if (state === 'loading') return 'Checking…'
+    if (state === 'error') return '↻ Check failed'
+    if (!result) return 'Check citations'
+    if (result.checked === 0) return 'No citations'
+    const bad = result.fabricated + result.mismatched + (result.retracted || 0)
+    return bad === 0
+      ? `✓ ${result.verified} cited, all real`
+      : `⚠ ${bad} of ${result.checked} suspect`
+  }
+
+  // Colour reflects the worst finding: a fabricated id is worse than an
+  // unsupported one, which is worse than a clean result.
+  const tone = !result || result.checked === 0 ? ''
+    : (result.fabricated > 0 || result.retracted > 0) ? 'cite-btn--bad'
+    : result.mismatched > 0 ? 'cite-btn--warn'
+    : 'cite-btn--ok'
+
+  return (
+    <>
+      <button
+        className={`mbox-act cite-btn ${tone}`}
+        onClick={run}
+        disabled={disabled || state === 'loading'}
+        title="Verify every PMID, DOI and author-year citation in this answer against PubMed and Crossref"
+      >
+        {label()}
+      </button>
+
+      {open && result && (
+        <div className="cite-panel">
+          {result.checked === 0 ? (
+            <p className="cite-none">
+              This answer cites no sources — no PMIDs, DOIs, or author–year references to check.
+            </p>
+          ) : (
+            <>
+              {/* A plain-language verdict, so the panel can be read without
+                  adding up chips to work out whether anything is wrong. */}
+              <p className="cite-head">
+                {result.fabricated + result.mismatched + (result.retracted || 0) === 0
+                  ? `All ${result.checked} citation${result.checked !== 1 ? 's' : ''} check out.`
+                  : `${result.fabricated + result.mismatched + (result.retracted || 0)} of ${result.checked} `
+                    + `citation${result.checked !== 1 ? 's' : ''} ${
+                      result.fabricated + result.mismatched + (result.retracted || 0) === 1 ? 'has' : 'have'} a problem.`}
+              </p>
+              <div className="cite-summary">
+                <span className="cite-stat cite-stat--ok">{result.verified} real</span>
+                {result.fabricated > 0 && (
+                  <span className="cite-stat cite-stat--bad">{result.fabricated} fabricated</span>
+                )}
+                {result.retracted > 0 && (
+                  <span className="cite-stat cite-stat--bad">{result.retracted} retracted</span>
+                )}
+                {result.mismatched > 0 && (
+                  <span className="cite-stat cite-stat--warn">{result.mismatched} unsupported</span>
+                )}
+                {result.unresolved > 0 && (
+                  <span className="cite-stat">{result.unresolved} unconfirmed</span>
+                )}
+              </div>
+
+              <ul className="cite-list">
+                {result.citations.map((c, i) => {
+                  const sup = c.support?.support
+                  const narrative = c.type === 'narrative'
+                  const cls = c.exists === false ? 'bad'
+                    : c.exists === null ? 'unknown'
+                    : c.retracted ? 'bad'
+                    : (sup === 'mismatched' || sup === 'unrelated') ? 'warn' : 'ok'
+                  const status = c.exists === false ? 'Fabricated'
+                    : c.exists === null
+                      ? (c.error === 'UNCONFIRMED' ? 'Not found' : 'Lookup failed')
+                    : c.retracted ? 'RETRACTED'
+                    : sup === 'supported' ? 'Supported'
+                    : (sup === 'mismatched' || sup === 'unrelated') ? 'Unsupported'
+                    : 'Real'
+                  const ref = narrative ? c.id : `${c.type.toUpperCase()} ${c.id}`
+                  return (
+                    <li key={`${c.id}-${i}`} className={`cite-item cite-item--${cls}`}>
+                      <div className="cite-id">
+                        {/* Verdict first: it is what the row is for. The
+                            identifier follows as the means of checking it. */}
+                        <span className={`cite-status cite-status--${cls}`}>{status}</span>
+                        {c.url
+                          ? <a href={c.url} target="_blank" rel="noopener noreferrer">{ref}</a>
+                          : <span className="cite-ref">{ref}</span>}
+                        {/* An author-year citation is matched by search, not
+                            looked up by identifier. The marker keeps that
+                            visible; the detail is on hover. */}
+                        {narrative && (
+                          <span className="cite-kind" title={
+                            c.match
+                              ? `Matched by search on ${c.match.replace(/\+/g, ' + ')} — `
+                                + 'not an exact identifier lookup'
+                              : 'Named in prose, with no PMID or DOI given'
+                          }>≈ matched</span>
+                        )}
+                      </div>
+                      {c.title && (
+                        <div className="cite-title">
+                          {narrative && <span className="cite-resolved">→ </span>}
+                          {c.title}
+                          {narrative && c.pmid && <span className="cite-resolved"> · PMID {c.pmid}</span>}
+                        </div>
+                      )}
+                      {c.exists === null && c.reason && (
+                        <div className="cite-reason">{c.reason}</div>
+                      )}
+                      {c.support?.reason && (sup === 'mismatched' || sup === 'unrelated') && (
+                        <div className="cite-reason">{c.support.reason}</div>
+                      )}
+                    </li>
+                  )
+                })}
+              </ul>
+              <UnsourcedClaims text={text} />
+
+              <p className="cite-foot">
+                Verified against PubMed and Crossref. <b>Unsupported</b> = the paper is
+                real but does not discuss this RNA. <b>Not found</b> = flagged for a
+                human, not counted as fabricated.
+              </p>
+            </>
+          )}
+        </div>
+      )}
+    </>
+  )
+}
+
+// Claims an answer made without citing anything.
+//
+// Verifying citations only measures the claims a model chose to cite, which
+// quietly rewards citing less — an answer that asserts everything and cites
+// nothing scores a perfect record. This asks the opposite question.
+//
+// Opt-in rather than automatic: it costs two PubMed calls per claim, and
+// running it for every answer in every box would make the page crawl.
+function UnsourcedClaims({ text }) {
+  const [state, setState] = useState('idle')
+  const [data, setData] = useState(null)
+
+  async function run() {
+    if (state === 'loading') return
+    setState('loading')
+    try {
+      const r = await postJSON('/literature/unsourced-claims', { text })
+      if (r?.status === 'ok') { setData(r); setState('done') }
+      else setState('error')
+    } catch { setState('error') }
+  }
+
+  if (state === 'idle') {
+    return (
+      <button className="council-more" onClick={run}
+              title="Search PubMed for literature behind the claims this answer did not cite">
+        Check uncited claims
+      </button>
+    )
+  }
+  if (state === 'loading') return <p className="cite-foot">Searching PubMed…</p>
+  if (state === 'error') {
+    return <button className="council-more" onClick={run}>↻ Check failed — retry</button>
+  }
+  if (!data?.checked) {
+    return <p className="cite-foot">No uncited molecular claims found in this answer.</p>
+  }
+
+  return (
+    <div className="unsourced">
+      <div className="council-detail-h">
+        Uncited claims — {data.none_found} of {data.checked} with nothing found
+      </div>
+      <ul className="cite-list">
+        {data.claims.map((c, i) => (
+          <li key={i} className={`cite-item cite-item--${
+            c.status === 'none_found' ? 'warn' : c.status === 'related_found' ? 'ok' : 'unknown'}`}>
+            <div className="cite-id">
+              <span className={`cite-status cite-status--${
+                c.status === 'none_found' ? 'warn' : c.status === 'related_found' ? 'ok' : 'unknown'}`}>
+                {c.status === 'none_found' ? 'Nothing found'
+                  : c.status === 'related_found' ? 'Related work' : 'Lookup failed'}
+              </span>
+            </div>
+            <div className="cite-title">{c.claim}</div>
+            {c.pmid && (
+              <div className="cite-reason" style={{ color: 'var(--text-slate)' }}>
+                <a href={c.url} target="_blank" rel="noopener noreferrer">PMID {c.pmid}</a>
+                {' — '}{c.title}
+              </div>
+            )}
+          </li>
+        ))}
+      </ul>
+      <p className="cite-foot">
+        A search cannot show a claim is true. <b>Related work</b> means literature on
+        the same molecule and topic exists, not that it supports this claim.
+        <b> Nothing found</b> is the informative result — worth checking by hand.
+      </p>
+    </div>
+  )
+}
+
+// One scale for every score shown, so a bar, a number and a chip never
+// disagree about whether a 6 is acceptable.
+const band = (n) => n == null ? 'unknown' : n >= 7 ? 'ok' : n >= 4 ? 'warn' : 'bad'
+
+// Per-model accuracy for the session: the deterministic citation record and the
+// AI judge's score, side by side but never blended. One is measured from public
+// registries; the other is a model's opinion. Averaging them would destroy the
+// only comparison that matters.
+function Scoreboard({ sessionId, modelKeys, onClose, turns }) {
+  const { user } = useAuth()
+  const [, force] = useState(0)
+  const [scoring, setScoring] = useState('idle')
+  useEffect(() => verifyStore.subscribe(() => force(n => n + 1)), [])
+
+  const rows = verifyStore.aggregate(sessionId, modelKeys)
+    .filter(r => r.answers > 0)
+    .sort((a, b) => (b.accuracy ?? -1) - (a.accuracy ?? -1))
+
+  // One scoring pass over every model's answer to the latest question, rather
+  // than a button per box. Scoring them together is what makes the numbers
+  // comparable: same rubric, same question, and a judge that is never the model
+  // being scored. Scored separately, a gap between two models would partly be
+  // a gap between their judges.
+  async function scoreAll() {
+    const turn = turns?.[turns.length - 1]
+    const a = turn?.assistant
+    if (!a || scoring === 'loading') return
+
+    const answers = {}
+    for (const k of modelKeys) {
+      const r = a.responses?.[k]
+      if (r?.status !== 'error' && r?.text) answers[k] = r.text
+    }
+    if (!Object.keys(answers).length) return
+
+    setScoring('loading')
+    try {
+      const verifications = {}
+      for (const k of Object.keys(answers)) {
+        const v = verifyStore.getResult(sessionId, a.id, k)
+        if (v) verifications[k] = v
+      }
+      const data = await postJSON('/agent/score-all', {
+        question: turn.user?.content || '', answers, verifications,
+        user_keys: buildUserKeys(),
+      })
+      if (data?.status !== 'ok') { setScoring('error'); return }
+
+      const dbRows = []
+      for (const [k, sc] of Object.entries(data.scores || {})) {
+        if (typeof sc?.overall !== 'number') continue
+        verifyStore.setScore(sessionId, a.id, k, sc)
+
+        // Both layers land in their own columns on one row, keyed the way the
+        // wet-lab verdict is, so a later verdict joins them rather than making
+        // a second row. That pairing is what makes "did the automated score
+        // predict the wet-lab result?" answerable per answer.
+        const v = verifications[k] || {}
+        dbRows.push({
+          session_id: sessionId,
+          user_id: user?.id || null,
+          submitted_by: user?.email || null,
+          msg_id: String(a.id),
+          model: k,
+          db_checked: v.checked ?? null,
+          db_verified: v.verified ?? null,
+          db_fabricated: v.fabricated ?? null,
+          db_mismatched: v.mismatched ?? null,
+          db_hallucination_rate: v.hallucination_rate ?? null,
+          db_miscitation_rate: v.miscitation_rate ?? null,
+          db_detail: v.citations ? { citations: v.citations } : null,
+          db_checked_at: v.checked != null ? new Date().toISOString() : null,
+          ai_score: sc.overall,
+          ai_dimensions: sc.scores || null,
+          ai_rationale: sc.rationale || null,
+          ai_red_flags: sc.red_flags || null,
+          ai_judge_model: sc.judge || null,
+          ai_saw_verification: !!sc.saw_verification,
+          ai_scored_at: new Date().toISOString(),
+        })
+      }
+      if (dbRows.length && isUuid(sessionId)) {
+        const { error } = await supabase.from('validations')
+          .upsert(dbRows, { onConflict: 'session_id,msg_id,model' })
+        if (error) console.error('[Scoreboard] Supabase upsert error:', error)
+      }
+      setScoring('done')
+    } catch { setScoring('error') }
+  }
+
+  const pct = (v) => v == null ? '—' : `${Math.round(v * 100)}%`
+
+  return (
+    <div className="scoreboard">
+      <div className="scoreboard-head">
+        <strong>Model accuracy this session</strong>
+        <button className="council-more" style={{ marginLeft: 'auto', marginBottom: 0 }}
+                onClick={scoreAll} disabled={scoring === 'loading'}>
+          {scoring === 'loading' ? 'Scoring…'
+            : scoring === 'error' ? '↻ Scoring failed'
+            : 'Score latest answers'}
+        </button>
+        <button className="scoreboard-close" onClick={onClose} title="Close">✕</button>
+      </div>
+
+      {rows.length === 0 ? (
+        <p className="cite-foot" style={{ marginTop: 0 }}>
+          No answers checked yet. Citations are verified automatically as answers arrive.
+        </p>
+      ) : (
+        <>
+          <table className="scoreboard-table">
+            <thead>
+              <tr>
+                <th>Model</th><th>Accurate</th>
+                <th title="Cited identifiers that do not exist">Fabricated</th>
+                <th title="Real papers that do not support the claim they were attached to">Unsupported</th>
+                <th title="Average judge score, 1-10. A different model scores each answer, blind to who wrote it. An opinion, not a measurement.">AI score</th>
+                <th title="Answers checked / citations found">n</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(r => {
+                const m = MODELS.find(x => x.key === r.model)
+                const a = r.accuracy
+                return (
+                  <tr key={r.model}>
+                    <td className="sb-model">
+                      <span className="sb-dot" style={{ background: m?.color || '#888' }} />
+                      {m?.label || r.model}
+                    </td>
+                    <td>
+                      <span className="sb-bar">
+                        <span className={`sb-fill sb-fill--${band(a == null ? null : a * 10)}`}
+                              style={{ width: `${Math.max(0, (a ?? 0) * 100)}%` }} />
+                      </span>
+                      <span className="sb-pct">{pct(a)}</span>
+                    </td>
+                    <td className={r.fabricated ? 'sb-bad' : ''}>{r.fabricated}</td>
+                    <td className={r.mismatched ? 'sb-warn' : ''}>{r.mismatched}</td>
+                    <td>
+                      {r.aiScore == null
+                        ? <span className="sb-n">—</span>
+                        : <span className={`sb-ai sb-ai--${band(r.aiScore)}`}>
+                            {r.aiScore.toFixed(1)}
+                          </span>}
+                    </td>
+                    <td className="sb-n">{r.answers}&nbsp;/&nbsp;{r.checked}</td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+          <p className="cite-foot">
+            <b>Accurate</b> = cited sources that exist <i>and</i> discuss the claim, measured
+            from PubMed and Crossref with no model involved. <b>AI score</b> is a separate
+            model's opinion of the answer — useful, but not a measurement, and never
+            averaged into the accuracy figure.
           </p>
-        ) : isError ? (
-          <p className="model-panel-error">
-            {response.error === 'RATE_LIMIT'
-              ? 'Rate limit hit — please wait a moment and retry.'
-              : response.error === 'API_KEY_INVALID'
-              ? 'API key invalid. Check your key in API Keys settings.'
-              : response.error === 'TIMEOUT'
-              ? 'Model timed out after 120 seconds.'
-              : response.error === 'SERVICE_UNAVAILABLE'
-              ? 'Gemini is under high demand right now. Please retry in a moment.'
-              : response.error === 'MODEL_UNAVAILABLE'
-              ? <>This model is temporarily busy on the free tier. Retry, or <button className="model-panel-link" onClick={() => window.dispatchEvent(new CustomEvent('omnimed:open_api_keys'))}>add your own key</button> for reliable access.</>
-              : response.error === 'DAILY_LIMIT_REACHED'
-              ? <>Daily free limit reached (5/day). <button className="model-panel-link" onClick={() => window.dispatchEvent(new CustomEvent('omnimed:open_api_keys'))}>Add your API key</button> to continue.</>
-              : `Error: ${response.error}`}
-          </p>
-        ) : (
-          <div
-            className="model-panel-text"
-            dangerouslySetInnerHTML={{ __html: safeHtml(response.text || '') }}
+        </>
+      )}
+    </div>
+  )
+}
+
+function ErrorText({ error }) {
+  const openKeys = () => window.dispatchEvent(new CustomEvent('omnimed:open_api_keys'))
+  return (
+    <p className="model-panel-error">
+      {error === 'RATE_LIMIT'
+        ? 'Rate limit hit — please wait a moment and retry.'
+        : error === 'API_KEY_INVALID'
+        ? 'API key invalid. Check your key in API Keys settings.'
+        : error === 'TIMEOUT'
+        ? 'Model timed out. Reasoning models can take several minutes on long research questions — try a narrower question, or a faster model.'
+        : error === 'REFUSED'
+        ? 'This model declined the request. Claude Fable 5 runs safety classifiers over research-biology topics and can decline legitimate biomedical questions — try Opus 5 or Sonnet 5 instead.'
+        : error === 'TRUNCATED_BEFORE_ANSWER'
+        ? 'The model used its whole token budget reasoning and produced no answer. Try a narrower question.'
+        : error === 'EMPTY_RESPONSE'
+        ? 'The model returned an empty response.'
+        : error === 'INSUFFICIENT_CREDITS'
+        ? <>Out of OpenRouter credits — this model could not be paid for. Top up at
+           openrouter.ai/credits, or <button className="model-panel-link" onClick={openKeys}>add your own key</button>.</>
+        : error === 'USAGE_LIMIT'
+        ? 'This provider\'s API usage limit has been reached. Raise the spend cap in the provider console, or use a different model.'
+        : error === 'SERVICE_UNAVAILABLE'
+        ? 'Gemini is under high demand right now. Please retry in a moment.'
+        : error === 'MODEL_UNAVAILABLE'
+        ? <>This model is temporarily busy on the free tier. Retry, or <button className="model-panel-link" onClick={openKeys}>add your own key</button> for reliable access.</>
+        : error === 'DAILY_LIMIT_REACHED'
+        ? <>Daily free limit reached (5/day). <button className="model-panel-link" onClick={openKeys}>Add your API key</button> to continue.</>
+        : `Error: ${error}`}
+    </p>
+  )
+}
+
+// The question is repeated at the top of every turn, in every box, so each box
+// reads as a complete thread on its own.
+function TurnQuestion({ user }) {
+  return (
+    <div className="mbox-q">
+      {user.content || <em>(attachment only)</em>}
+      {user.attachments?.length > 0 && (
+        <span className="mbox-q-atts">
+          {user.attachments.map((a, i) => (
+            <span key={i} className="mbox-q-att">
+              {a.file_type === 'image' ? '🖼️' : a.file_type === 'pdf' ? '📄' : '📎'} {a.filename}
+            </span>
+          ))}
+        </span>
+      )}
+    </div>
+  )
+}
+
+// One turn inside a model box: the question, then that model's answer.
+function ModelTurn({ turn, modelKey, sessionId }) {
+  const [copied, setCopied] = useState(false)
+  const assistant = turn.assistant
+  // A turn only queried the models that were in boxes at the time. If this
+  // model wasn't one of them, say so rather than showing a false blank.
+  const wasQueried = !assistant || (assistant.activeModels || []).includes(modelKey)
+  const response   = assistant?.responses?.[modelKey]
+
+  const isLoading = wasQueried && (!assistant || !response)
+  const isStopped = response?.status === 'stopped'
+  const isError   = response?.status === 'error' || response?.status === 'TIMED_OUT'
+  const isOk      = !isLoading && !isStopped && !isError && !!response
+
+  function copyText() {
+    navigator.clipboard.writeText(response?.text || '').then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    })
+  }
+
+  return (
+    <div className="mbox-turn" data-turn={turn.user.id}>
+      <TurnQuestion user={turn.user} />
+
+      {!wasQueried ? (
+        <p className="mbox-notqueried">Not queried for this message.</p>
+      ) : isLoading ? (
+        <div className="model-panel-loading">
+          <span className="dot-pulse" />
+          <span className="dot-pulse" style={{ animationDelay: '0.2s' }} />
+          <span className="dot-pulse" style={{ animationDelay: '0.4s' }} />
+        </div>
+      ) : isStopped ? (
+        <p className="model-panel-error" style={{ color: '#f59e0b' }}>Response stopped by user.</p>
+      ) : isError ? (
+        <ErrorText error={response.error} />
+      ) : (
+        <div
+          className="model-panel-text"
+          dangerouslySetInnerHTML={{ __html: safeHtml(response.text || '') }}
+        />
+      )}
+
+      {wasQueried && (isOk || isError || isStopped) && (
+        <div className="mbox-actions">
+          {isOk && (
+            <button className="mbox-act" onClick={copyText} title="Copy response">
+              {copied ? '✓ Copied' : 'Copy'}
+            </button>
+          )}
+          <WetLabScore
+            modelKey={modelKey}
+            msgId={assistant.id}
+            sessionId={sessionId}
+            disabled={!isOk}
           />
+          {isOk && (
+            <CitationCheck
+              text={response.text || ''}
+              sessionId={sessionId}
+              msgId={assistant.id}
+              modelKey={modelKey}
+            />
+          )}
+          {isOk && response.served_model && (
+            // The provider's own report of which model ran. Models are
+            // unreliable about their own identity — one may answer "I'm Sonnet
+            // 4.5" simply because it was trained before it existed — so this is
+            // the only trustworthy provenance for a scored answer.
+            <span
+              className="mbox-served"
+              title="Model the provider reported as serving this answer"
+            >
+              {response.served_model}
+            </span>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// The council's verdict across every model's answer.
+//
+// Ordered by what a researcher needs first: the answer, then enough context to
+// trust it, then the candidates, and only then the disagreements. The previous
+// synthesis returned several paragraphs of prose, which meant reading the whole
+// thing to find out what it concluded.
+function CouncilVerdict({ verdict, judge }) {
+  const [showDetail, setShowDetail] = useState(false)
+  const extras = (verdict.disagreements?.length || 0) + (verdict.caveats?.length || 0)
+
+  return (
+    <div className="council">
+      {verdict.headline && <p className="council-headline">{verdict.headline}</p>}
+      {verdict.summary && <p className="council-summary">{verdict.summary}</p>}
+
+      {verdict.candidates?.length > 0 && (
+        <ul className="council-list">
+          {verdict.candidates.map((c, i) => (
+            <li key={`${c.name}-${i}`} className={`council-cand council-cand--${c.confidence}`}>
+              <div className="council-cand-top">
+                <span className="council-rank">{i + 1}</span>
+                <span className="council-name">{c.name}</span>
+                <span className={`council-conf council-conf--${c.confidence}`}>{c.confidence}</span>
+                {c.models > 0 && (
+                  <span className="council-models"
+                        title="How many models proposed this. Agreement is weak evidence on its own — models share training data.">
+                    {c.models} {c.models === 1 ? 'model' : 'models'}
+                  </span>
+                )}
+              </div>
+              {c.why && <div className="council-why">{c.why}</div>}
+              {c.caveat && <div className="council-caveat">{c.caveat}</div>}
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {extras > 0 && (
+        <>
+          <button className="council-more" onClick={() => setShowDetail(v => !v)}>
+            {showDetail ? 'Hide' : `Disagreements & caveats (${extras})`}
+          </button>
+          {showDetail && (
+            <div className="council-detail">
+              {verdict.disagreements?.length > 0 && (
+                <>
+                  <div className="council-detail-h">Where the models disagreed</div>
+                  <ul className="council-bullets">
+                    {verdict.disagreements.map((d, i) => <li key={i}>{d}</li>)}
+                  </ul>
+                </>
+              )}
+              {verdict.caveats?.length > 0 && (
+                <>
+                  <div className="council-detail-h">Caveats</div>
+                  <ul className="council-bullets">
+                    {verdict.caveats.map((c, i) => <li key={i}>{c}</li>)}
+                  </ul>
+                </>
+              )}
+            </div>
+          )}
+        </>
+      )}
+
+      <p className="cite-foot">
+        Synthesised by {MODELS.find(m => m.key === judge)?.label || judge || 'a separate model'},
+        which saw each answer's citation-check result but not which model wrote it.
+      </p>
+    </div>
+  )
+}
+
+// A model box: one model, its whole conversation, its own scroll.
+function ModelBox({ modelKey, onModelChange, takenModels, turns, sessionId,
+                    maximized, onToggleMax, opts, onOptsChange, isMetered }) {
+  const model = MODELS.find(m => m.key === modelKey) || MODELS[0]
+  const o = opts || {}
+  return (
+    <div className="mbox">
+      <div className="mbox-head" style={{ borderColor: model.color }}>
+        <span className="mbox-head-hint">Model</span>
+        <select
+          className="mbox-select"
+          // `backgroundColor`, not the `background` shorthand: the shorthand
+          // resets background-image, which would wipe the chevron the
+          // stylesheet draws and leave the control looking like a plain label.
+          style={{ backgroundColor: model.bg, color: model.color }}
+          value={model.key}
+          onChange={e => onModelChange(e.target.value)}
+          title="Change model for this box"
+        >
+          {MODEL_GROUPS.map(g => (
+            <optgroup key={g} label={g}>
+              {MODELS.filter(m => m.group === g).map(m => (
+                <option
+                  key={m.key}
+                  value={m.key}
+                  disabled={m.key !== model.key && takenModels.includes(m.key)}
+                >
+                  {m.label}{isMetered(m) ? ' · 5/day' : ''}
+                </option>
+              ))}
+            </optgroup>
+          ))}
+        </select>
+        <button
+          className="mbox-max"
+          onClick={onToggleMax}
+          title={maximized ? 'Restore grid' : 'Expand this box'}
+        >
+          {maximized ? '⤡' : '⤢'}
+        </button>
+      </div>
+
+      {/* Per-model literature options. Placeholders — nothing is sent to the
+          backend yet. Kept per box because one model may be given literature
+          while another answers from training alone. */}
+      <div className="mbox-tools">
+        <select
+          className={`mbox-tool ${o.db ? 'mbox-tool--on' : ''}`}
+          value={o.db || ''}
+          onChange={e => onOptsChange({ ...o, db: e.target.value })}
+          title={`Literature source for ${model.label} (not wired up yet)`}
+        >
+          <option value="">📚 Select database</option>
+          {DATABASES.map(d => <option key={d.key} value={d.key}>{d.label}</option>)}
+        </select>
+        <select
+          className={`mbox-tool ${o.dates ? 'mbox-tool--on' : ''}`}
+          value={o.dates || ''}
+          onChange={e => onOptsChange({ ...o, dates: e.target.value })}
+          title={`Publication date range for ${model.label} (not wired up yet)`}
+        >
+          <option value="">📅 Date range</option>
+          {DATE_RANGES.map(d => <option key={d.key} value={d.key}>{d.label}</option>)}
+        </select>
+        {(o.db || o.dates) && <span className="mbox-optnote">not active yet</span>}
+      </div>
+
+      <div className="mbox-body">
+        {turns.length === 0 ? (
+          <p className="mbox-empty">Ask a question to see {model.label}'s answer here.</p>
+        ) : (
+          turns.map(t => (
+            <ModelTurn key={t.user.id} turn={t} modelKey={modelKey} sessionId={sessionId} />
+          ))
         )}
       </div>
     </div>
   )
 }
 
-function ConclusionBlock({ responses, mode, onGenerate, conclusion, loading, activeModels }) {
-  const active = MODELS.filter(m => (activeModels || []).includes(m.key))
-  const allDone = active.every(m => responses[m.key] && responses[m.key].status !== undefined)
-
-  if (!allDone || active.length === 0) return null
-
-  const modelNames = active.map(m => m.label.split(' ')[0]).join(', ')
+// The conclusion box mirrors a model box, but its "answer" is the synthesis.
+// A turn that was never synthesized before the next question records that
+// plainly instead of leaving a silent gap.
+function ConclusionBox({ turns, maximized, onToggleMax, onGenerate }) {
+  const lastId = turns.length ? turns[turns.length - 1].user.id : null
+  // An optional question aimed at the synthesis only. The individual models
+  // have already answered and are never re-queried, so this can only change how
+  // their answers are read, not what they said.
+  const [focus, setFocus] = useState('')
 
   return (
-    <div className="conclusion-wrap">
-      {!conclusion && !loading && (
-        <button className="btn-conclusion" onClick={onGenerate}>
-          🔍 Get Conclusion from {modelNames}
+    <div className="mbox mbox--conclusion">
+      <div className="mbox-head mbox-head--conclusion">
+        <span className="mbox-select mbox-select--static">🔍 Conclusion</span>
+        <button
+          className="mbox-max"
+          onClick={onToggleMax}
+          title={maximized ? 'Restore grid' : 'Expand this box'}
+        >
+          {maximized ? '⤡' : '⤢'}
         </button>
-      )}
-      {loading && (
-        <div className="conclusion-loading">
-          <span className="dot-pulse" /><span className="dot-pulse" style={{ animationDelay: '0.2s' }} /><span className="dot-pulse" style={{ animationDelay: '0.4s' }} />
-          <span style={{ marginLeft: 8, color: '#64748b', fontSize: '0.85rem' }}>Gemini synthesizing…</span>
-        </div>
-      )}
-      {conclusion && (
-        <div className="conclusion-card">
-          <div className="conclusion-header">
-            <span className="conclusion-badge">Conclusion</span>
-          </div>
-          <div
-            className="conclusion-text"
-            dangerouslySetInnerHTML={{ __html: safeHtml(
-              typeof conclusion === 'string' ? conclusion : JSON.stringify(conclusion, null, 2)
-            )}}
-          />
-        </div>
-      )}
+      </div>
+
+      {/* Matches the height of the model boxes' options strip, so every box
+          starts its content at the same eye level for comparison. */}
+      <div className="mbox-tools">
+        <span className="mbox-toolnote">Synthesized from every model's answer</span>
+      </div>
+
+      <div className="mbox-body">
+        {turns.length === 0 ? (
+          <p className="mbox-empty">The synthesis across all models appears here.</p>
+        ) : turns.map(t => {
+          const a       = t.assistant
+          const active  = MODELS.filter(m => (a?.activeModels || []).includes(m.key))
+          const allDone = !!a && active.length > 0 &&
+            active.every(m => a.responses?.[m.key] && a.responses[m.key].status !== undefined)
+          const isLast  = t.user.id === lastId
+
+          return (
+            <div className="mbox-turn" data-turn={t.user.id} key={t.user.id}>
+              <TurnQuestion user={t.user} />
+
+              {a?.conclusionLoading ? (
+                <div className="model-panel-loading">
+                  <span className="dot-pulse" />
+                  <span className="dot-pulse" style={{ animationDelay: '0.2s' }} />
+                  <span className="dot-pulse" style={{ animationDelay: '0.4s' }} />
+                  <span className="mbox-synth">synthesizing…</span>
+                </div>
+              ) : a?.conclusion ? (
+                <>
+                  {a.conclusionFocus && (
+                    <div className="concl-asked">
+                      <span className="concl-asked-label">Asked</span> {a.conclusionFocus}
+                    </div>
+                  )}
+                  {typeof a.conclusion === 'object' && a.conclusion !== null ? (
+                    <CouncilVerdict verdict={a.conclusion} judge={a.conclusionJudge} />
+                  ) : (
+                    // Older turns, and the fallback when the judge ignored the
+                    // schema, are still plain text.
+                    <div
+                      className="model-panel-text"
+                      dangerouslySetInnerHTML={{ __html: safeHtml(String(a.conclusion)) }}
+                    />
+                  )}
+                </>
+              ) : isLast ? (
+                <div className="concl-ask">
+                  <textarea
+                    className="concl-ask-input"
+                    placeholder="Optional — ask the synthesis something (e.g. “rank these by strength of evidence”). Only the conclusion sees this; the models are not re-queried."
+                    value={focus}
+                    onChange={e => setFocus(e.target.value)}
+                    rows={2}
+                    disabled={!allDone}
+                  />
+                  <button
+                    className="btn-conclusion"
+                    onClick={() => onGenerate(t, focus)}
+                    disabled={!allDone}
+                    title={allDone ? 'Synthesize across all models' : 'Waiting for all models to finish'}
+                  >
+                    🔍 Get Conclusion
+                  </button>
+                </div>
+              ) : (
+                <p className="mbox-notqueried">No conclusion returned.</p>
+              )}
+            </div>
+          )
+        })}
+      </div>
     </div>
   )
 }
@@ -390,11 +1189,95 @@ export default function Chat() {
   const [apiKeyModal, setApiKeyModal] = useState(null) // null | model key string
   const [sending, setSending] = useState(false)
   const [attachments, setAttachments] = useState([])
-  const [selectedModels, setSelectedModels] = useState(['gemini'])
-  const bottomRef = useRef(null)
+  const [boxModels, setBoxModels] = useState(loadBoxModels)
+  const [maximized, setMaximized] = useState(null)   // null | model key | 'conclusion'
+  const [activeTurn, setActiveTurn] = useState(null)
+  const [showScoreboard, setShowScoreboard] = useState(false)
+  // Web search is off by default and costs real money when on: the tool
+  // definition alone adds ~2,200 input tokens to every message, and each search
+  // the model runs is billed on top.
+  const [webSearch, setWebSearch] = useState(false)
+  // Per-model retrieval options, keyed by model rather than by box position so
+  // the setting follows a model when it is moved to a different box.
+  // Placeholders — not yet sent to the backend.
+  const [modelOpts, setModelOpts] = useState(loadModelOpts)
   const textareaRef = useRef(null)
   const fileInputRef = useRef(null)
   const abortControllerRef = useRef(null)
+
+  // The query fans out to whichever models currently occupy boxes.
+  const selectedModels = boxModels
+
+  useEffect(() => {
+    try { localStorage.setItem(BOX_KEY, JSON.stringify(boxModels)) } catch {}
+  }, [boxModels])
+
+  useEffect(() => {
+    try { localStorage.setItem(OPTS_KEY, JSON.stringify(modelOpts)) } catch {}
+  }, [modelOpts])
+
+  const setModelOpt = useCallback((key, next) => {
+    setModelOpts(prev => ({ ...prev, [key]: next }))
+  }, [])
+
+  // Pair each user message with its assistant reply. Every box walks this same
+  // list, so turn N means the same thing in all of them.
+  const turns = useMemo(() => {
+    const out = []
+    for (let i = 0; i < messages.length; i++) {
+      if (messages[i].role !== 'user') continue
+      const next = messages[i + 1]
+      out.push({ user: messages[i], assistant: next?.role === 'assistant' ? next : null })
+    }
+    return out
+  }, [messages])
+
+  // A gated model is only actually metered for *this* user. Admins and granted
+  // users have unlimited backend access, and anyone who supplied their own
+  // provider key is billed on that key — none of them should see a 5/day mark.
+  const isMetered = useCallback(
+    (m) => !!m?.gated && !hasBackendAccess && !modelHasKey(m.key),
+    [hasBackendAccess],
+  )
+
+  const setBoxModel = useCallback((idx, key) => {
+    setBoxModels(prev => prev.map((k, i) => (i === idx ? key : k)))
+  }, [])
+
+  const addBox = useCallback(() => {
+    setBoxModels(prev => {
+      if (prev.length >= MAX_BOXES) return prev
+      const free = MODELS.find(m => !prev.includes(m.key))
+      return free ? [...prev, free.key] : prev
+    })
+  }, [])
+
+  const removeBox = useCallback(() => {
+    setBoxModels(prev => (prev.length > 1 ? prev.slice(0, -1) : prev))
+  }, [])
+
+  // Align every box on the same turn. Response lengths differ wildly between
+  // models, so turn N sits at a different pixel offset in each box — matching
+  // scrollTop would misalign. Anchoring on the turn element is what lines the
+  // answers up.
+  //
+  // Offsets are measured from the scroll container's own box rather than with
+  // offsetTop: offsetTop is relative to the nearest *positioned* ancestor,
+  // which here is the document, so it silently included the page header and
+  // each box's position in the grid and scrolled to the wrong place.
+  const alignToTurn = useCallback((turnId, behavior = 'smooth') => {
+    if (turnId == null) return
+    const sel = typeof CSS !== 'undefined' && CSS.escape
+      ? `[data-turn="${CSS.escape(String(turnId))}"]`
+      : `[data-turn="${turnId}"]`
+    for (const el of document.querySelectorAll('.mbox-body')) {
+      const target = el.querySelector(sel)
+      if (!target) continue
+      const delta = target.getBoundingClientRect().top - el.getBoundingClientRect().top
+      el.scrollTo({ top: el.scrollTop + delta - 10, behavior })
+    }
+    setActiveTurn(turnId)
+  }, [])
 
   // Load or create session — cached instantly, then refreshed from Supabase
   // (source of truth) so history follows the user across devices.
@@ -425,16 +1308,25 @@ export default function Chat() {
       setMessages([])
       setInput('')
       setAttachments([])
-      setSelectedModels(['gemini'])
+      setMaximized(null)
+      lastTurnCount.current = 0
     }
     window.addEventListener('omnimed:new_chat', handler)
     return () => window.removeEventListener('omnimed:new_chat', handler)
   }, [])
 
-  // Scroll to bottom on new message
+  // Jump every box to the newest turn when one is added. Keyed on the turn
+  // count rather than on `messages`: the previous version fired on every
+  // streamed chunk, which is why the view fought you while answers arrived.
+  const lastTurnCount = useRef(0)
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages])
+    if (turns.length && turns.length !== lastTurnCount.current) {
+      lastTurnCount.current = turns.length
+      const id = turns[turns.length - 1].user.id
+      // Wait for the new turn to be in the DOM before measuring against it.
+      requestAnimationFrame(() => requestAnimationFrame(() => alignToTurn(id, 'auto')))
+    }
+  }, [turns, alignToTurn])
 
   // Create the session row first and adopt its DB uuid as the canonical id, so
   // documents, usage logs, validations and atomic turn-append all link to it.
@@ -520,7 +1412,9 @@ export default function Chat() {
       role: 'assistant',
       mode,
       activeModels: [...selectedModels],
-      responses: { claude: null, gpt4: null, gemini: null },
+      // Seed from the models actually in boxes — the old hard-coded trio left
+      // stale keys behind and no key for anything else.
+      responses: Object.fromEntries(selectedModels.map(k => [k, null])),
       conclusion: null,
       conclusionLoading: false,
     }
@@ -529,23 +1423,28 @@ export default function Chat() {
     setMessages(newMessages)
     saveConversation(userId, sid, text.slice(0, 50), newMessages)
 
-    // Build per-model history — same mode only, last 20 items (10 pairs)
+    // Per-model history: this chat, same mode, and only the turns this model
+    // answered. A question is sent with its own answer or not at all — a model
+    // added to a box later, or one that failed, used to receive a run of
+    // questions with no replies, which cost tokens and confused it.
+    // 12 items (6 exchanges) is what the backend keeps (MAX_HISTORY_ITEMS).
     function buildHistory(modelKey, existingMessages, currentMode) {
       const history = []
+      let question = null
       for (const m of existingMessages) {
-        if (m.role === 'user' && m.mode === currentMode) {
-          history.push({ role: 'user', content: m.content })
-        } else if (m.role === 'assistant' && m.mode === currentMode) {
+        if (m.mode !== currentMode) continue
+        if (m.role === 'user') {
+          question = m.content || '[Shared file(s)]'
+        } else if (m.role === 'assistant' && question != null) {
           const r = m.responses?.[modelKey]
-          // Include completed responses and stopped ones (as partial context)
-          if (r?.status === 'ok') {
-            history.push({ role: 'assistant', content: r.text })
-          } else if (r?.status === 'stopped') {
-            history.push({ role: 'assistant', content: '[Response was stopped by user]' })
-          }
+          const answer = r?.status === 'ok' ? r.text
+                       : r?.status === 'stopped' ? '[Response was stopped by user]'
+                       : null
+          if (answer) history.push({ role: 'user', content: question }, { role: 'assistant', content: answer })
+          question = null
         }
       }
-      return history.slice(-20)
+      return history.slice(-12)
     }
 
     // One backend call fans out to all selected models; results stream back
@@ -590,7 +1489,8 @@ export default function Chat() {
 
     try {
       await askStream(
-        { message: text, models: selectedModels, mode, session_id: sid, histories, attachments: readyAtts, system_prompt: resolvePromptContent(), user_keys: buildUserKeys() },
+        { message: text, models: selectedModels, mode, session_id: sid, histories, attachments: readyAtts,
+          system_prompt: resolvePromptContent(), user_keys: buildUserKeys(), web_search: webSearch },
         {
           signal,
           onModel: ({ model, response }) => applyResponse(model, response),
@@ -611,7 +1511,7 @@ export default function Chat() {
     setSending(false)
   }
 
-  async function getConclusion(assistantMsgId, responses, msgMode, activeModels) {
+  async function getConclusion(assistantMsgId, responses, msgMode, activeModels, focus = '') {
     setMessages(prev => prev.map(m =>
       m.id === assistantMsgId ? { ...m, conclusionLoading: true } : m
     ))
@@ -627,19 +1527,40 @@ export default function Chat() {
       }
     })
 
+    // The citation checks already ran automatically for this turn, so the
+    // council is told which answers held up rather than having to take every
+    // claim at face value. Agreement between models is weak evidence on its
+    // own — they share training data — so verification is what breaks ties.
+    const verifications = {}
+    for (const key of Object.keys(modelResponses)) {
+      const v = verifyStore.getResult(sessionId, assistantMsgId, key)
+      if (v) verifications[key] = {
+        checked: v.checked, verified: v.verified,
+        fabricated: v.fabricated, mismatched: v.mismatched,
+      }
+    }
+
+    const question = messages.find(m => m.id === assistantMsgId)?.question
+      || [...messages].reverse().find(m => m.role === 'user')?.content || ''
+
     try {
       const sid = sessionId || newSessionId()
-      const data = await postJSON('/meta-analysis', {
-        session_id: sid, model_responses: modelResponses, model_labels: modelLabels, mode: msgMode,
+      const data = await postJSON('/agent/council', {
+        session_id: sid, question, answers: modelResponses, verifications,
+        focus: focus || undefined, user_keys: buildUserKeys(),
       })
-      const conclusionText = data.meta_analysis
-        ? (typeof data.meta_analysis === 'string' ? data.meta_analysis : JSON.stringify(data.meta_analysis, null, 2))
-        : 'No conclusion returned.'
+
+      // `verdict` is the structured result the box renders. `raw` is the
+      // fallback when the judge ignored the schema — a readable paragraph
+      // still beats an error message.
+      const conclusion = data.verdict || data.raw || 'No conclusion returned.'
 
       setMessages(prev => {
         const updated = prev.map(m =>
           m.id === assistantMsgId
-            ? { ...m, conclusion: conclusionText, conclusionLoading: false }
+            ? { ...m, conclusion, conclusionLoading: false,
+                conclusionJudge: data.judge || null,
+                conclusionFocus: focus?.trim() || null }
             : m
         )
         if (sessionId) saveConversation(userId, sessionId, '', updated)
@@ -649,7 +1570,9 @@ export default function Chat() {
       // Persist the conclusion onto the assistant turn (title unchanged).
       const assistantWithConclusion = {
         id: assistantMsgId, role: 'assistant', mode: msgMode,
-        activeModels, responses, conclusion: conclusionText,
+        activeModels, responses, conclusion,
+        conclusionJudge: data.judge || null,
+        conclusionFocus: focus?.trim() || null,
       }
       chatStore.saveTurn(sessionId, userId, null, [assistantWithConclusion]).catch(() => {})
     } catch {
@@ -695,8 +1618,6 @@ export default function Chat() {
     }
   }
 
-  const isEmpty = messages.length === 0
-
   return (
     <div className="chat-page">
       {/* Mode bar */}
@@ -730,66 +1651,78 @@ export default function Chat() {
         )}
       </div>
 
-      {/* Messages area */}
-      <div className="chat-messages">
-        {isEmpty && (
-          <div className="chat-welcome">
-            <div className="chat-welcome-icon"><Logo size={56} /></div>
-            <h2 className="chat-welcome-title">OmniMed Multi-LLM Research</h2>
-            <p className="chat-welcome-sub">
-              Ask anything across Claude, GPT-4, and Gemini simultaneously.<br />
-              Switch to <strong>Biomedical</strong> mode for scientific context, or <strong>Research</strong> for miRNA extraction.
-            </p>
-          </div>
-        )}
-
-        {messages.map((msg) => {
-          if (msg.role === 'user') {
-            return (
-              <div key={msg.id} className="chat-row chat-row--user">
-                {msg.attachments?.length > 0 && (
-                  <div className="chat-att-pills">
-                    {msg.attachments.map((a, i) => (
-                      <span key={i} className="chat-att-pill">
-                        {a.file_type === 'image' ? '🖼️' : a.file_type === 'pdf' ? '📄' : '📎'} {a.filename}
-                      </span>
-                    ))}
-                  </div>
-                )}
-                {msg.content && <div className="chat-bubble-user">{msg.content}</div>}
-                <div className="chat-mode-tag">{MODES.find(m => m.key === msg.mode)?.icon} {msg.mode}</div>
+      {/* Turn navigator — aligns every box on the same question */}
+      {turns.length > 0 && !maximized && (
+        <div className="chat-turnbar">
+          {turns.length > 1 && (
+            <>
+              <span className="chat-turnbar-label">Jump to question</span>
+              <div className="chat-turnpills">
+                {turns.map((t, i) => (
+                  <button
+                    key={t.user.id}
+                    className={`chat-turnpill ${activeTurn === t.user.id ? 'chat-turnpill--active' : ''}`}
+                    onClick={() => alignToTurn(t.user.id)}
+                    title={t.user.content?.slice(0, 80) || `Question ${i + 1}`}
+                  >
+                    {i + 1}
+                  </button>
+                ))}
               </div>
-            )
-          }
+            </>
+          )}
+          <button
+            className={`chat-scoreboard-btn ${showScoreboard ? 'chat-scoreboard-btn--on' : ''}`}
+            onClick={() => setShowScoreboard(v => !v)}
+            title="Per-model citation accuracy, pooled across this session"
+          >
+            Accuracy
+          </button>
+        </div>
+      )}
 
-          // Assistant message
-          return (
-            <div key={msg.id} className="chat-row chat-row--assistant">
-              <div className="model-panels-row">
-                {MODELS.filter(m => (msg.activeModels || ['claude','gpt4','gemini']).includes(m.key)).map(m => (
-                  <ModelPanel
-                    key={m.key}
-                    model={m}
-                    response={msg.responses[m.key]}
-                    loading={!msg.responses[m.key]}
-                    msgId={msg.id}
-                    sessionId={sessionId}
-                  />
-                  ))}
-              </div>
+      {showScoreboard && !maximized && (
+        <Scoreboard
+          sessionId={sessionId}
+          modelKeys={boxModels}
+          turns={turns}
+          onClose={() => setShowScoreboard(false)}
+        />
+      )}
 
-              <ConclusionBlock
-                responses={msg.responses}
-                mode={msg.mode}
-                conclusion={msg.conclusion}
-                loading={msg.conclusionLoading}
-                activeModels={msg.activeModels || []}
-                onGenerate={() => getConclusion(msg.id, msg.responses, msg.mode, msg.activeModels)}
-              />
-            </div>
+      {/* Fixed grid — the page itself never scrolls, each box scrolls alone */}
+      <div
+        className="chat-grid"
+        style={{ '--cols': maximized ? 1 : gridCols(boxModels.length + 1) }}
+      >
+        {boxModels.map((key, idx) => (
+          (!maximized || maximized === key) && (
+            <ModelBox
+              key={`${key}-${idx}`}
+              modelKey={key}
+              onModelChange={k => setBoxModel(idx, k)}
+              takenModels={boxModels}
+              turns={turns}
+              sessionId={sessionId}
+              opts={modelOpts[key]}
+              onOptsChange={next => setModelOpt(key, next)}
+              isMetered={isMetered}
+              maximized={maximized === key}
+              onToggleMax={() => setMaximized(maximized === key ? null : key)}
+            />
           )
-        })}
-        <div ref={bottomRef} />
+        ))}
+
+        {(!maximized || maximized === 'conclusion') && (
+          <ConclusionBox
+            turns={turns}
+            maximized={maximized === 'conclusion'}
+            onToggleMax={() => setMaximized(maximized === 'conclusion' ? null : 'conclusion')}
+            onGenerate={(t, focus) => t.assistant && getConclusion(
+              t.assistant.id, t.assistant.responses, t.assistant.mode, t.assistant.activeModels, focus
+            )}
+          />
+        )}
       </div>
 
       {/* Input bar */}
@@ -834,35 +1767,38 @@ export default function Chat() {
             onSelect={setSelectedPromptId}
           />
 
-          {/* Model selector toggles */}
-          <div className="model-selector">
-            {MODELS.map(m => {
-              const active   = selectedModels.includes(m.key)
-              const isGated  = m.key === 'claude' || m.key === 'gpt4'
-              // Gated models are usable by everyone (5 free/day). The backend
-              // enforces the limit and returns DAILY_LIMIT_REACHED, which prompts
-              // for a key. Premium (own key / granted / admin) removes the badge.
-              const premium  = !isGated || modelHasKey(m.key) || hasBackendAccess
-              return (
-                <button
-                  key={m.key}
-                  className={`model-toggle ${active ? 'model-toggle--on' : 'model-toggle--off'}`}
-                  style={active ? { borderColor: m.color, color: m.color } : {}}
-                  onClick={() => {
-                    if (active && selectedModels.length === 1) return
-                    setSelectedModels(prev =>
-                      active ? prev.filter(k => k !== m.key) : [...prev, m.key]
-                    )
-                  }}
-                  title={active ? `Exclude ${m.label}` : `Include ${m.label}`}
-                  disabled={sending}
-                >
-                  {active && <span className="model-toggle-check">✓</span>}
-                  {m.label.split(' ')[0]}
-                  {isGated && !premium && <span className="model-toggle-badge" title="5 free/day, then add your key">5/day</span>}
-                </button>
-              )
-            })}
+          <button
+            className={`query-opt ${webSearch ? 'query-opt--on' : ''}`}
+            onClick={() => setWebSearch(v => !v)}
+            title={webSearch
+              ? 'Web search ON — models may search the live web. Costs more per message.'
+              : 'Web search OFF — models answer from training data only. Much cheaper.'}
+            disabled={sending}
+          >
+            🌐 Web search{webSearch ? ' · on' : ''}
+          </button>
+
+
+          {/* Box count. Which model goes in which box is chosen in its header. */}
+          <div className="box-count">
+            <button
+              className="box-count-btn"
+              onClick={removeBox}
+              disabled={boxModels.length <= 1 || sending}
+              title="Remove a model box"
+            >−</button>
+            <span className="box-count-label">
+              {boxModels.length} model{boxModels.length !== 1 ? 's' : ''}
+              {boxModels.some(k => isMetered(MODELS.find(m => m.key === k))) && (
+                <span className="model-toggle-badge" title="5 free/day, then add your key">5/day</span>
+              )}
+            </span>
+            <button
+              className="box-count-btn"
+              onClick={addBox}
+              disabled={boxModels.length >= MAX_BOXES || sending}
+              title="Add a model box"
+            >+</button>
           </div>
           <textarea
             ref={textareaRef}

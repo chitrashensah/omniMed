@@ -16,6 +16,7 @@ export default function Sidebar({
   const [editingId, setEditingId]       = useState(null)
   const [editTitle, setEditTitle]       = useState('')
   const [confirmDeleteId, setConfirmDeleteId] = useState(null)
+  const [syncError, setSyncError] = useState('')
   const editInputRef = useRef(null)
   const navigate = useNavigate()
   const { sessionId } = useParams()
@@ -72,15 +73,26 @@ export default function Sidebar({
     setConfirmDeleteId(id)
   }
 
-  function confirmDelete() {
+  // Removed from the list at once, but put back if the server refuses: a
+  // silent failure looked deleted until the next reload brought it back.
+  async function confirmDelete() {
     const id = confirmDeleteId
+    const previous = conversations
     setConfirmDeleteId(null)
+    setSyncError('')
     const updated = conversations.filter(c => c.id !== id)
     localStorage.setItem(convKey, JSON.stringify(updated))
-    localStorage.removeItem(msgKeyFor(id))
     setConversations(updated)
-    chatStore.deleteConversation(id).catch(() => {})  // also remove server-side (cascades messages)
     if (sessionId === id) navigate('/')
+    try {
+      await chatStore.deleteConversation(id)
+      localStorage.removeItem(msgKeyFor(id))
+    } catch (err) {
+      console.error('[Sidebar] delete failed:', err)
+      localStorage.setItem(convKey, JSON.stringify(previous))
+      setConversations(previous)
+      setSyncError('Could not delete that conversation. Please try again.')
+    }
   }
 
   function cancelDelete() {
@@ -95,13 +107,22 @@ export default function Sidebar({
     setTimeout(() => editInputRef.current?.focus(), 50)
   }
 
-  function saveEdit(id) {
+  async function saveEdit(id) {
     const title = editTitle.trim() || 'Untitled'
+    const previous = conversations
     const updated = conversations.map(c => c.id === id ? { ...c, title } : c)
     localStorage.setItem(convKey, JSON.stringify(updated))
     setConversations(updated)
     setEditingId(null)
-    chatStore.renameConversation(id, title).catch(() => {})  // persist rename server-side
+    setSyncError('')
+    try {
+      await chatStore.renameConversation(id, title)
+    } catch (err) {
+      console.error('[Sidebar] rename failed:', err)
+      localStorage.setItem(convKey, JSON.stringify(previous))
+      setConversations(previous)
+      setSyncError('Could not rename that conversation. Please try again.')
+    }
   }
 
   function handleEditKeyDown(e, id) {
@@ -163,6 +184,12 @@ export default function Sidebar({
         {!collapsed && (
           <nav className="sidebar-nav">
             <p className="sidebar-nav-label">Recent</p>
+            {syncError && (
+              <p className="sidebar-error" role="alert">
+                {syncError}
+                <button className="sidebar-error-close" onClick={() => setSyncError('')} aria-label="Dismiss">×</button>
+              </p>
+            )}
             {conversations.length === 0 && (
               <p className="sidebar-empty">No conversations yet</p>
             )}

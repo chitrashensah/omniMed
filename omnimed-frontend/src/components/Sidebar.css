@@ -324,6 +324,30 @@
   opacity: 0.88;
 }
 
+/* Shown when a delete or rename did not reach the server */
+.sidebar-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0 8px 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(255,119,89,0.12);
+  color: var(--coral);
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+.sidebar-error-close {
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: inherit;
+  font-size: 0.9rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+}
+
 /* ── Bottom section ── */
 .sidebar-bottom {
   border-top: 1px solid var(--sidebar-border);

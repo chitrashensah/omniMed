@@ -6,6 +6,8 @@ from routes.compare import compare_bp, run_comparison_logic
 from routes.chat import chat_bp
 from routes.upload import upload_bp
 from routes.admin import admin_bp
+from routes.literature import literature_bp
+from routes.agent import agent_bp
 from routes.auth import require_auth
 
 load_dotenv()
@@ -28,6 +30,8 @@ app.register_blueprint(compare_bp)
 app.register_blueprint(chat_bp)
 app.register_blueprint(upload_bp)
 app.register_blueprint(admin_bp)
+app.register_blueprint(literature_bp)
+app.register_blueprint(agent_bp)
 
 
 @app.route("/health", methods=["GET"])

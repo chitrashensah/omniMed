@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import queue
 import asyncio
@@ -17,11 +18,86 @@ from services import rag_service
 chat_bp = Blueprint("chat", __name__)
 
 GEMINI_MODEL = "gemini-2.5-flash"
-TIMEOUT = 120
+TIMEOUT = 300
+# Claude models think before answering, and thinking shares the max_tokens
+# budget with the visible reply — 4096 is enough for a chat answer but a
+# research question can spend it all reasoning and return nothing. This is a
+# ceiling, not a charge: unused tokens cost nothing.
+ANTHROPIC_MIN_MAX_TOKENS = 8192
+# Gemini 2.5+ thinks before answering and the reasoning is billed against
+# max_output_tokens, same as Claude. Measured: a 3-part biomedical question
+# spent 860 of 900 tokens thinking and returned a 36-token truncated answer.
+GEMINI_MIN_MAX_TOKENS = 8192
+
+# Same reasoning-budget problem on the OpenAI-compatible providers: Qwen 3.x
+# and the DeepSeek reasoning tiers spend output tokens thinking before any
+# visible text, so a low cap yields an empty answer rather than a short one.
+# Measured on a five-part biomedical question: Qwen 3.7 Plus spent 6,522
+# output tokens and DeepSeek V4 exhausted 8,192 without emitting an answer,
+# so the floor has to clear the thinking with room to spare.
+OPENAI_LIKE_MIN_MAX_TOKENS = 16384
 GEMINI_RETRY_WAIT = 15
 
-VALID_MODELS    = {"claude", "gpt4", "gemini", "deepseek", "groq", "qwen", "cohere"}
-GATED_MODELS    = {"claude", "gpt4"}   # require key or consume daily free quota
+# Groq dropped the Llama 3.3 endpoint entirely; this is its current offering.
+GROQ_MODEL = "openai/gpt-oss-120b"
+
+# Cohere superseded command-r-plus with the command-a line.
+COHERE_MODEL = "command-a-plus-05-2026"
+
+# Models beyond the original seven. Keys are permanent identifiers: they are
+# stored in `validations.model` and in cached conversations, so a key must never
+# be renamed or repointed at a different model — add a new one instead.
+# Every id below was verified against the provider's live /models endpoint.
+EXTRA_MODELS = {
+    # Anthropic
+    "opus55":    {"provider": "anthropic", "id": "claude-opus-5-5"},
+    "opus5":     {"provider": "anthropic", "id": "claude-opus-5"},
+    "opus48":    {"provider": "anthropic", "id": "claude-opus-4-8"},
+    "sonnet55":  {"provider": "anthropic", "id": "claude-sonnet-5-5"},
+    "sonnet5":   {"provider": "anthropic", "id": "claude-sonnet-5"},
+    "fable51":   {"provider": "anthropic", "id": "claude-fable-5-1"},
+    "fable5":    {"provider": "anthropic", "id": "claude-fable-5"},
+    # OpenAI — every id here takes max_completion_tokens, not max_tokens.
+    "gpt6astra": {"provider": "openai", "id": "gpt-6-astra",  "token_param": "max_completion_tokens"},
+    "gpt61sol":  {"provider": "openai", "id": "gpt-6.1-sol",  "token_param": "max_completion_tokens"},
+    "gpt56sol":  {"provider": "openai", "id": "gpt-5.6-sol",  "token_param": "max_completion_tokens"},
+    "gpt55":     {"provider": "openai", "id": "gpt-5.5",      "token_param": "max_completion_tokens"},
+    "gpt54mini": {"provider": "openai", "id": "gpt-5.4-mini", "token_param": "max_completion_tokens"},
+    # DeepSeek — the API now lists exactly two models. deepseek-chat (V3) and
+    # deepseek-v4-flash are both gone from it, so the old ids are retired.
+    "deepseek_pro":   {"provider": "deepseek", "id": "deepseek-v4-pro"},
+    # Listed by DeepSeek's API but unresponsive: no reply to a one-line prompt
+    # inside the full 300s timeout, repeatedly. Kept registered so historical
+    # validations rows resolve, but not offered in the UI.
+    "deepseek_flash": {"provider": "deepseek", "id": "deepseek-flash"},
+    # Google — Flash tiers only. Gemini Pro returns 429 RESOURCE_EXHAUSTED on a
+    # free-tier key, so listing it would ship a model that always errors.
+    "gemini38":  {"provider": "google", "id": "gemini-3.8-flash", "search": False},
+    "gemini36":  {"provider": "google", "id": "gemini-3.6-flash", "search": False},
+    "gemini35":  {"provider": "google", "id": "gemini-3.5-flash", "search": False},
+    # Qwen — served through OpenRouter, like the existing "qwen" entry.
+    "qwen38flash": {"provider": "openrouter", "id": "qwen/qwen3.8-flash"},
+    "qwen38max":   {"provider": "openrouter", "id": "qwen/qwen3.8-max"},
+    "qwen37plus":  {"provider": "openrouter", "id": "qwen/qwen3.7-plus"},
+    "qwen36flash": {"provider": "openrouter", "id": "qwen/qwen3.6-flash"},
+}
+
+# Several models share one provider credential: every Anthropic model
+# authenticates with the user's "claude" key, every OpenAI model with "gpt4".
+# Without this, a user who supplied an Anthropic key would still be metered on
+# Opus 5 because the lookup would miss.
+PROVIDER_KEY_FOR_MODEL = {
+    k: {"anthropic": "claude", "openai": "gpt4", "deepseek": "deepseek",
+        "google": "gemini", "openrouter": "qwen"}[m["provider"]]
+    for k, m in EXTRA_MODELS.items()
+}
+
+VALID_MODELS    = {"claude", "gpt4", "gemini", "deepseek", "groq", "qwen", "cohere"} | set(EXTRA_MODELS)
+# Anthropic and OpenAI models bill per token on the project's keys, so they are
+# metered. DeepSeek stays ungated to match the existing "deepseek" entry.
+GATED_MODELS    = {"claude", "gpt4"} | {
+    k for k, m in EXTRA_MODELS.items() if m["provider"] in ("anthropic", "openai")
+}
 FREE_LIMIT      = 5                     # messages/user/day on backend keys
 ADMIN_EMAILS    = [e.strip().lower() for e in
                    (os.getenv("ADMIN_EMAILS") or os.getenv("ADMIN_EMAIL", "chitrashenshah@gmail.com")).split(",")
@@ -38,7 +114,16 @@ _session_docs_cache: dict = {}
 _session_chunks_cache: dict = {}
 
 MAX_HISTORY_ITEMS = 12        # server-side cap (≈6 turns) regardless of client
+MAX_MODELS_PER_REQUEST = 5    # the site's five boxes (Chat.jsx MAX_BOXES)
 MAX_DOC_CONTEXT_CHARS = 80_000  # cap total injected document text
+
+# An item cap alone does not bound cost here. Answers in this app are long
+# biomedical writeups with citation lists — several thousand characters each —
+# so 12 of them is tens of thousands of tokens, resent to every model on every
+# turn and multiplied by the number of boxes. These budgets are what actually
+# bounds the bill; the item cap only limits how far back the thread reaches.
+MAX_HISTORY_CHARS = 24_000        # ≈6k tokens of history per model per turn
+MAX_HISTORY_MSG_CHARS = 4_000     # one long answer cannot crowd out the rest
 
 # Hidden baseline applied to every biomedical-mode request, on top of whatever
 # prompt the user selected. Never shown in the UI.
@@ -46,6 +131,22 @@ BIOMEDICAL_BASE_PROMPT = (
     "The user is a biomedical researcher, scientist, and graduate student. "
     "Tailor every response for a scientific audience: use precise terminology, "
     "cite mechanisms where relevant, and provide the depth an expert would expect."
+    "\n\n"
+    # Citations are verified against PubMed after the fact, and a claim with no
+    # identifier cannot be checked. Asking for PMIDs is what makes the answer
+    # measurable. The negative half matters as much as the positive: told to
+    # "always cite", models attach references to definitions and pleasantries,
+    # which buries the claims that actually needed support.
+    "CITATIONS: When you state a specific experimental finding, a clinical "
+    "result, or a claim about what a particular molecule does, give the PMID "
+    "in the form `PMID: 12345678` immediately after it. One PMID per claim is "
+    "enough.\n"
+    "Do NOT attach citations to definitions, background explanation, reasoning "
+    "about mechanism, your own recommendations, or conversational replies — "
+    "those need no reference and adding one obscures the claims that do.\n"
+    "If you do not know a real PMID for a claim, say so plainly, or cite it as "
+    "author and year. Never invent, guess at, or approximate an identifier: a "
+    "fabricated PMID is far worse than an uncited claim."
 )
 
 
@@ -94,8 +195,8 @@ def _model_quota_ok(user_id: str, today: str, model: str) -> bool:
 
 def _gated_blocked_models(user: dict, user_keys: dict, gated_requested: list) -> set:
     """
-    Return the set of gated models (Claude/GPT-4o) the user cannot use right now.
-    Each gated model has its OWN 5/day limit — Claude and GPT-4o are independent.
+    Return the set of gated models the user cannot use right now.
+    Each gated model has its OWN 5/day limit — they are counted independently.
     """
     if not gated_requested:
         return set()
@@ -115,8 +216,14 @@ def _gated_blocked_models(user: dict, user_keys: dict, gated_requested: list) ->
 
     blocked = set()
     for m in gated_requested:
-        # Own key for this model (direct or via OpenRouter) → allowed
-        if user_keys.get(m) or user_keys.get("openrouter"):
+        # Own key for this model's provider → allowed. An OpenRouter key counts
+        # only for the models _run_model actually sends through OpenRouter
+        # (claude, gpt4). The newer Anthropic and OpenAI models always run on
+        # the provider's own key, so counting it for them let any non-empty
+        # "openrouter" value lift the limit on the project's keys.
+        if user_keys.get(PROVIDER_KEY_FOR_MODEL.get(m, m)):
+            continue
+        if user_keys.get("openrouter") and m in OPENROUTER_MODEL_IDS:
             continue
         if not _model_quota_ok(user_id, today, m):
             blocked.add(m)
@@ -148,17 +255,22 @@ def _usage(input_t=0, output_t=0, cache_read=0, cache_write=0) -> dict:
 
 # ── Document context (persistent session files, injected + cached) ──────────
 
-def _build_document_context(docs: list, session_id: str | None = None, query: str = "") -> str:
+def _build_document_context(docs: list, session_id: str | None = None,
+                            query: str = "") -> tuple[str, str]:
     """
-    Build the document context to inject for a query.
+    Build the document context for a query, as (stable, per_question).
 
-    - No docs → empty.
-    - Small total (< RAG threshold) → send the whole document(s), prompt-cached.
-    - Large total → RAG: embed the query, retrieve only the most relevant chunks.
+    - No docs → ("", "").
+    - Small total (< RAG threshold) → the whole document(s) as `stable`. It is
+      identical on every turn, so it belongs in the system prompt and caches.
+    - Large total → RAG: the passages retrieved for this question, as
+      `per_question`. They change every turn, so they must go AFTER the
+      history: placed before it, they changed the prompt prefix on every turn
+      and no provider could cache the conversation behind them.
       Falls back to truncated full text if retrieval is unavailable.
     """
     if not docs:
-        return ""
+        return "", ""
 
     total_chars = sum(len((d.get("content") or "")) for d in docs)
 
@@ -167,13 +279,13 @@ def _build_document_context(docs: list, session_id: str | None = None, query: st
             and _session_chunks_cache.get(session_id) is not False):
         retrieved = _retrieve_chunks(session_id, query)
         if retrieved:
-            return (
+            return "", (
                 "The most relevant passages from the uploaded document(s) for this "
                 "question are below. Use them as your primary reference:\n\n" + retrieved
             )
 
     # Otherwise send the full text (capped), letting prompt caching handle repetition.
-    return _full_document_context(docs)
+    return _full_document_context(docs), ""
 
 
 def _retrieve_chunks(session_id: str, query: str) -> str:
@@ -240,18 +352,50 @@ def _build_full_message(message: str, text_atts: list) -> str:
 
 def _compose_system(system_prompt: str | None, doc_context: str) -> str | None:
     """
-    Compose the system text. The stable system prompt goes FIRST so it forms a
-    consistent cacheable prefix across turns; the document context (which varies
-    per query once RAG retrieval kicks in) goes last so it doesn't invalidate the
-    cached prefix.
+    Compose the system text: the system prompt, then any whole documents.
+    Both are identical on every turn, so system + history form a stable prefix
+    that OpenAI, DeepSeek and Gemini cache automatically. Per-question RAG
+    passages are kept out of here (see _build_document_context).
     """
     parts = [p for p in (system_prompt, doc_context) if p]
     return "\n\n".join(parts) if parts else None
 
 
+def _trim_msg(content: str, role: str) -> str:
+    """Keep a long assistant answer's shape without its bulk.
+
+    The head carries the claims and the tail carries the citation list, which
+    is what later turns actually refer back to; the middle is elaboration the
+    model can do without. User messages are left alone — they are short, and
+    they are the questions the thread is about.
+    """
+    if role == "user" or len(content) <= MAX_HISTORY_MSG_CHARS:
+        return content
+    head = int(MAX_HISTORY_MSG_CHARS * 0.7)
+    tail = MAX_HISTORY_MSG_CHARS - head
+    return f"{content[:head]}\n\n[…trimmed for context…]\n\n{content[-tail:]}"
+
+
 def _cap_history(history: list) -> list:
-    valid = [h for h in history if h.get("role") in ("user", "assistant") and h.get("content")]
-    return valid[-MAX_HISTORY_ITEMS:]
+    """Most recent turns, under both an item cap and a character budget."""
+    valid = [h for h in history
+             if h.get("role") in ("user", "assistant") and h.get("content")]
+
+    kept, total = [], 0
+    for h in reversed(valid[-MAX_HISTORY_ITEMS:]):
+        content = _trim_msg(str(h["content"]), h["role"])
+        if kept and total + len(content) > MAX_HISTORY_CHARS:
+            break                      # always keep at least the latest exchange
+        kept.append({"role": h["role"], "content": content})
+        total += len(content)
+
+    kept.reverse()
+    # A leading assistant turn is a dangling reply to a question that was
+    # dropped; some providers also reject a history that does not start with
+    # a user turn.
+    while kept and kept[0]["role"] == "assistant":
+        kept.pop(0)
+    return kept
 
 
 # ── Content builders for multimodal ────────────────────────────────────────
@@ -280,19 +424,28 @@ def _build_user_content_gpt(text: str, image_atts: list):
 
 # ── Model callers — each returns {model, status, text, usage} ───────────────
 
-async def _call_claude(message, system_prompt, doc_context, history, image_atts, max_tokens=4096, user_api_key=None):
+async def _call_claude(message, system_prompt, doc_context, history, image_atts, max_tokens=4096,
+                       user_api_key=None, model_id="claude-sonnet-4-6", model_key="claude",
+                       use_search=False):
     api_key = user_api_key or os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
-        return {"model": "claude", "status": "error", "error": "API_KEY_INVALID", "usage": _usage()}
+        return {"model": model_key, "status": "error", "error": "API_KEY_INVALID", "usage": _usage()}
     try:
         client = anthropic.AsyncAnthropic(api_key=api_key)
         messages = [{"role": h["role"], "content": h["content"]} for h in _cap_history(history)]
+        if messages:
+            # Cache breakpoint on the last earlier turn. Only the system prompt
+            # and documents were marked before, so every follow-up paid full
+            # price to resend the conversation. With this, the next turn reads
+            # everything up to here from cache (Anthropic checks earlier block
+            # boundaries for a matching prefix automatically).
+            last = messages[-1]
+            last["content"] = [{"type": "text", "text": last["content"],
+                                "cache_control": {"type": "ephemeral"}}]
         messages.append({"role": "user", "content": _build_user_content_claude(message, image_atts)})
 
-        # System prompt first (stable → cached across turns), document context
-        # last (varies per query with RAG → its own cache breakpoint). Both get
-        # cache_control so small stable docs still cache, while the system prompt
-        # stays cached even when retrieved passages change.
+        # System prompt, then whole documents: both identical on every turn, so
+        # both cache. Retrieved passages are not here; they ride in the message.
         system_blocks = []
         if system_prompt:
             system_blocks.append({"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}})
@@ -300,11 +453,12 @@ async def _call_claude(message, system_prompt, doc_context, history, image_atts,
             system_blocks.append({"type": "text", "text": doc_context, "cache_control": {"type": "ephemeral"}})
 
         kwargs = dict(
-            model="claude-sonnet-4-6",
-            max_tokens=max_tokens,
+            model=model_id,
+            max_tokens=max(max_tokens, ANTHROPIC_MIN_MAX_TOKENS),
             messages=messages,
-            tools=[{"type": "web_search_20250305", "name": "web_search"}],
         )
+        if use_search:
+            kwargs["tools"] = [{"type": "web_search_20250305", "name": "web_search"}]
         if system_blocks:
             kwargs["system"] = system_blocks
 
@@ -315,15 +469,51 @@ async def _call_claude(message, system_prompt, doc_context, history, image_atts,
             getattr(u, "input_tokens", 0), getattr(u, "output_tokens", 0),
             getattr(u, "cache_read_input_tokens", 0), getattr(u, "cache_creation_input_tokens", 0),
         )
-        return {"model": "claude", "status": "ok", "text": text, "usage": usage}
+        served = getattr(response, "model", None)
+        stop = getattr(response, "stop_reason", None)
+
+        # Safety classifiers can decline a request: HTTP 200, empty content,
+        # stop_reason "refusal". Reported as success before, which rendered as a
+        # blank panel with no explanation.
+        if stop == "refusal":
+            details = getattr(response, "stop_details", None)
+            cat = getattr(details, "category", None) if details else None
+            return {"model": model_key, "status": "error", "error": "REFUSED",
+                    "refusal_category": cat, "usage": usage, "served_model": served}
+
+        if not text.strip():
+            # Thinking and the visible answer share one max_tokens budget, so a
+            # hard question can spend the whole budget reasoning and leave no
+            # text behind. Say so rather than showing an empty box.
+            err = "TRUNCATED_BEFORE_ANSWER" if stop == "max_tokens" else "EMPTY_RESPONSE"
+            return {"model": model_key, "status": "error", "error": err,
+                    "usage": usage, "served_model": served}
+
+        # `response.model` is the server's own report of which model ran. Models
+        # are unreliable narrators about their own identity, so this is the only
+        # trustworthy provenance for a scored answer.
+        return {"model": model_key, "status": "ok", "text": text, "usage": usage,
+                "served_model": served, "stop_reason": stop}
     except asyncio.TimeoutError:
-        return {"model": "claude", "status": "TIMED_OUT", "error": "TIMEOUT", "usage": _usage()}
+        return {"model": model_key, "status": "TIMED_OUT", "error": "TIMEOUT", "usage": _usage()}
     except anthropic.AuthenticationError:
-        return {"model": "claude", "status": "error", "error": "API_KEY_INVALID", "usage": _usage()}
+        return {"model": model_key, "status": "error", "error": "API_KEY_INVALID", "usage": _usage()}
     except anthropic.RateLimitError:
-        return {"model": "claude", "status": "error", "error": "RATE_LIMIT", "usage": _usage()}
+        return {"model": model_key, "status": "error", "error": "RATE_LIMIT", "usage": _usage()}
+    except anthropic.BadRequestError as e:
+        msg = str(e)
+        if "usage limit" in msg.lower():
+            # Surface the reset date the API gives us — this is a configured
+            # spend cap, not an empty balance, so the user needs to know when it
+            # lifts (or that they can raise it now).
+            import re as _re
+            when = _re.search(r"regain access on ([0-9]{4}-[0-9]{2}-[0-9]{2}[^\"']*)", msg)
+            return {"model": model_key, "status": "error", "error": "USAGE_LIMIT",
+                    "limit_resets": when.group(1).strip() if when else None,
+                    "usage": _usage()}
+        return {"model": model_key, "status": "error", "error": msg[:200], "usage": _usage()}
     except Exception as e:
-        return {"model": "claude", "status": "error", "error": str(e), "usage": _usage()}
+        return {"model": model_key, "status": "error", "error": str(e)[:200], "usage": _usage()}
 
 
 def _openai_usage(response) -> dict:
@@ -338,8 +528,41 @@ def _openai_usage(response) -> dict:
         return _usage()
 
 
+# Hidden reasoning, not conversation history, is what makes this expensive.
+# Measured on one literature question: DeepSeek V4 Pro billed 6,432 output
+# tokens to show 1,054 characters — roughly 6,000 tokens of thinking nobody
+# ever sees, charged at output rates (3-5x input). Input was 122 tokens.
+#
+# Disabling it was not a trade of quality for cost. The same question answered
+# with thinking off used 722 output tokens and returned 3,134 characters — an
+# eighth of the spend and three times the answer, because the reasoning had
+# been consuming the budget the answer needed.
+#
+# Kept configurable per model: a provider that benefits from thinking can opt
+# back in here without touching the call sites.
+# Left empty deliberately. Disabling reasoning cut DeepSeek's output tokens by
+# 89%, but what that measured was cost and answer length — not whether the
+# science was still right. Reasoning is exactly what a synthesis question needs,
+# and this project asks synthesis questions. Until the two are compared properly
+# (same questions, thinking on vs off, scored blind), thinking stays on and the
+# saving is pursued through caching instead.
+#
+# Populate a provider here to disable its reasoning, e.g.
+#   "deepseek": {"thinking": {"type": "disabled"}}
+REASONING_OFF: dict = {}
+
+# Reasoning models on these providers think before answering, and the thinking
+# shares the output budget. Uncapped, Qwen 3.8 Flash thought past the 300s
+# timeout and Command A+ spent all 4,096 tokens thinking, so both returned
+# nothing on a research question (measured 2026-10-21). Capped at 6,000, both
+# answered in 40–90s. Sent as extra_body; models that do not reason ignore it.
+REASONING_BUDGET = 6000
+REASONING_CAP: dict = {"openrouter": {"reasoning": {"max_tokens": REASONING_BUDGET}}}
+
+
 async def _call_openai_like(model_key, model_name, base_url, api_key,
-                            message, system_prompt, doc_context, history, image_atts, max_tokens):
+                            message, system_prompt, doc_context, history, image_atts, max_tokens,
+                            token_param="max_tokens", provider=None):
     if not api_key:
         return {"model": model_key, "status": "error", "error": "API_KEY_INVALID", "usage": _usage()}
     try:
@@ -354,10 +577,47 @@ async def _call_openai_like(model_key, model_name, base_url, api_key,
         user_content = _build_user_content_gpt(message, image_atts) if image_atts else message
         messages.append({"role": "user", "content": user_content})
 
-        response = await asyncio.wait_for(
-            client.chat.completions.create(model=model_name, max_tokens=max_tokens, messages=messages),
-            timeout=TIMEOUT,
-        )
+        # Newer OpenAI models reject `max_tokens` and require
+        # `max_completion_tokens`. Try the requested spelling, then swap once on
+        # the specific 400 so a future model doesn't need a code change here.
+        # Qwen 3.x and the DeepSeek reasoning tiers think before answering, and
+        # the thinking is billed against this same budget. At 4096 a hard
+        # question can be entirely consumed by reasoning, returning an empty
+        # answer that looked like "the model said nothing". The cap is not a
+        # reservation — raising it costs nothing unless the tokens are used.
+        reasoning = REASONING_OFF.get(provider or "")
+        extra_body = reasoning or REASONING_CAP.get(provider or "")
+        extra = {"extra_body": extra_body} if extra_body else {}
+        # With thinking off the floor is no longer needed — it existed only to
+        # leave room for reasoning that no longer happens.
+        budget = max_tokens if reasoning else max(max_tokens, OPENAI_LIKE_MIN_MAX_TOKENS)
+
+        async def _create(param):
+            return await asyncio.wait_for(
+                client.chat.completions.create(
+                    model=model_name, messages=messages, **{param: budget}, **extra),
+                timeout=TIMEOUT,
+            )
+
+        try:
+            response = await _create(token_param)
+        except openai.BadRequestError as e:
+            other = "max_completion_tokens" if token_param == "max_tokens" else "max_tokens"
+            if other in str(e):
+                response = await _create(other)
+            else:
+                raise
+        except Exception as e:
+            # OpenRouter refuses the request outright when the account cannot
+            # cover the requested cap ("can only afford N tokens"). The floor
+            # above is what provokes this, so honour the number it names rather
+            # than failing a request the account could still pay for.
+            afford = re.search(r"can only afford (\d+)", str(e))
+            if afford and "402" in str(e):
+                budget = max(256, int(afford.group(1)))
+                response = await _create(token_param)
+            else:
+                raise
         # OpenRouter/free tiers sometimes return an error-shaped body (HTTP 200 with
         # choices=None or an embedded error) instead of raising. Handle gracefully.
         choices = getattr(response, "choices", None)
@@ -369,8 +629,21 @@ async def _call_openai_like(model_key, model_name, base_url, api_key,
             if "rate" in msg or "429" in msg or "limit" in msg:
                 return {"model": model_key, "status": "error", "error": "RATE_LIMIT", "usage": _usage()}
             return {"model": model_key, "status": "error", "error": "MODEL_UNAVAILABLE", "usage": _usage()}
+        # An exhausted budget on a reasoning model returns HTTP 200 with empty
+        # content. Reported as "ok" that renders as a blank box with nothing to
+        # explain it — the Claude and Gemini paths already distinguish these,
+        # and this one has to as well or a silent blank is indistinguishable
+        # from a model that genuinely had nothing to say.
+        text = (choices[0].message.content or "").strip()
+        if not text:
+            finish = getattr(choices[0], "finish_reason", None)
+            return {"model": model_key, "status": "error",
+                    "error": "TRUNCATED_BEFORE_ANSWER" if finish == "length" else "EMPTY_RESPONSE",
+                    "usage": _openai_usage(response),
+                    "served_model": getattr(response, "model", None)}
         return {"model": model_key, "status": "ok",
-                "text": choices[0].message.content, "usage": _openai_usage(response)}
+                "text": text, "usage": _openai_usage(response),
+                "served_model": getattr(response, "model", None)}
     except asyncio.TimeoutError:
         return {"model": model_key, "status": "TIMED_OUT", "error": "TIMEOUT", "usage": _usage()}
     except openai.AuthenticationError:
@@ -379,6 +652,9 @@ async def _call_openai_like(model_key, model_name, base_url, api_key,
         return {"model": model_key, "status": "error", "error": "RATE_LIMIT", "usage": _usage()}
     except Exception as e:
         err = str(e)
+        if "402" in err or "requires more credits" in err:
+            return {"model": model_key, "status": "error",
+                    "error": "INSUFFICIENT_CREDITS", "usage": _usage()}
         low = err.lower()
         # OpenRouter/provider errors arrive as a big JSON string — map to clean codes
         if "429" in err or "rate-limit" in low or "rate limit" in low:
@@ -396,10 +672,11 @@ async def _call_gpt(message, system_prompt, doc_context, history, image_atts, ma
                                    message, system_prompt, doc_context, history, image_atts, max_tokens)
 
 
-async def _call_gemini(message, system_prompt, doc_context, history, image_atts, max_tokens=4096, user_api_key=None):
+async def _call_gemini(message, system_prompt, doc_context, history, image_atts, max_tokens=4096,
+                       user_api_key=None, model_id=None, model_key="gemini", use_search=False):
     api_key = user_api_key or os.getenv("GEMINI_API_KEY")
     if not api_key:
-        return {"model": "gemini", "status": "error", "error": "API_KEY_INVALID", "usage": _usage()}
+        return {"model": model_key, "status": "error", "error": "API_KEY_INVALID", "usage": _usage()}
     try:
         client = genai.Client(api_key=api_key)
         contents = []
@@ -410,10 +687,13 @@ async def _call_gemini(message, system_prompt, doc_context, history, image_atts,
         parts.append({"text": message})
         contents.append({"role": "user", "parts": parts})
 
+        # Search grounding is per-model: on a free-tier key only Gemini 2.5
+        # Flash carries the grounding quota. Sending the tool to a 3.x model
+        # returns 429 even though the model itself answers fine without it.
         config = genai_types.GenerateContentConfig(
-            max_output_tokens=max_tokens,
-            tools=[genai_types.Tool(google_search=genai_types.GoogleSearch())],
-        )
+            max_output_tokens=max(max_tokens, GEMINI_MIN_MAX_TOKENS))
+        if use_search:
+            config.tools = [genai_types.Tool(google_search=genai_types.GoogleSearch())]
         composed = _compose_system(system_prompt, doc_context)
         if composed:
             config.system_instruction = composed
@@ -423,7 +703,7 @@ async def _call_gemini(message, system_prompt, doc_context, history, image_atts,
         async def _do_call():
             return await asyncio.wait_for(
                 loop.run_in_executor(None, lambda: client.models.generate_content(
-                    model=GEMINI_MODEL, contents=contents, config=config)),
+                    model=model_id or GEMINI_MODEL, contents=contents, config=config)),
                 timeout=TIMEOUT,
             )
 
@@ -442,19 +722,44 @@ async def _call_gemini(message, system_prompt, doc_context, history, image_atts,
             getattr(um, "candidates_token_count", 0) if um else 0,
             getattr(um, "cached_content_token_count", 0) if um else 0, 0,
         )
-        return {"model": "gemini", "status": "ok", "text": response.text, "usage": usage}
+        served = getattr(response, "model_version", None) or model_id or GEMINI_MODEL
+        text = response.text or ""
+
+        # Thinking shares the output budget, so a hard question can exhaust it
+        # before any answer is written. This used to return status "ok" with a
+        # sentence-long reply — a silently truncated answer is worse than an
+        # error, because it would be scored as the model's real attempt.
+        finish = ""
+        try:
+            finish = str(response.candidates[0].finish_reason or "")
+        except Exception:
+            pass
+        if "MAX_TOKENS" in finish.upper():
+            if not text.strip():
+                return {"model": model_key, "status": "error",
+                        "error": "TRUNCATED_BEFORE_ANSWER",
+                        "usage": usage, "served_model": served}
+            return {"model": model_key, "status": "ok", "text": text, "usage": usage,
+                    "served_model": served, "truncated": True}
+
+        if not text.strip():
+            return {"model": model_key, "status": "error", "error": "EMPTY_RESPONSE",
+                    "usage": usage, "served_model": served}
+
+        return {"model": model_key, "status": "ok", "text": text, "usage": usage,
+                "served_model": served}
     except asyncio.TimeoutError:
-        return {"model": "gemini", "status": "TIMED_OUT", "error": "TIMEOUT", "usage": _usage()}
+        return {"model": model_key, "status": "TIMED_OUT", "error": "TIMEOUT", "usage": _usage()}
     except Exception as e:
         err = str(e)
         if "503" in err or "UNAVAILABLE" in err.upper():
-            return {"model": "gemini", "status": "error", "error": "SERVICE_UNAVAILABLE",
+            return {"model": model_key, "status": "error", "error": "SERVICE_UNAVAILABLE",
                     "message": "Gemini is experiencing high demand. Try again in a moment.", "usage": _usage()}
         if "429" in err or "QUOTA" in err.upper() or "RATE" in err.upper():
-            return {"model": "gemini", "status": "error", "error": "RATE_LIMIT", "usage": _usage()}
+            return {"model": model_key, "status": "error", "error": "RATE_LIMIT", "usage": _usage()}
         if "API_KEY" in err.upper() or "INVALID" in err.upper():
-            return {"model": "gemini", "status": "error", "error": "API_KEY_INVALID", "usage": _usage()}
-        return {"model": "gemini", "status": "error", "error": err, "usage": _usage()}
+            return {"model": model_key, "status": "error", "error": "API_KEY_INVALID", "usage": _usage()}
+        return {"model": model_key, "status": "error", "error": err, "usage": _usage()}
 
 
 async def _call_cohere(message, system_prompt, doc_context, history, image_atts, max_tokens=4096, user_api_key=None):
@@ -472,7 +777,9 @@ async def _call_cohere(message, system_prompt, doc_context, history, image_atts,
         messages.append({"role": "user", "content": message})
 
         response = await asyncio.wait_for(
-            client.chat(model="command-r-plus-08-2024", messages=messages, max_tokens=max_tokens),
+            client.chat(model=COHERE_MODEL, messages=messages,
+                        max_tokens=max(max_tokens, OPENAI_LIKE_MIN_MAX_TOKENS),
+                        thinking={"type": "enabled", "token_budget": REASONING_BUDGET}),
             timeout=TIMEOUT,
         )
         usage = _usage()
@@ -481,7 +788,17 @@ async def _call_cohere(message, system_prompt, doc_context, history, image_atts,
             usage = _usage(getattr(bu, "input_tokens", 0), getattr(bu, "output_tokens", 0))
         except Exception:
             pass
-        return {"model": "cohere", "status": "ok", "text": response.message.content[0].text, "usage": usage}
+        # The command-a line reasons before answering, so content[0] can be a
+        # thinking block with no .text at all — taking it blindly raised
+        # "'ThinkingAssistantMessageResponseContentItem' object has no
+        # attribute 'text'". Join the text items and ignore the reasoning.
+        parts = [c.text for c in (response.message.content or [])
+                 if getattr(c, "text", None)]
+        text = "\n".join(parts).strip()
+        if not text:
+            return {"model": "cohere", "status": "error",
+                    "error": "EMPTY_RESPONSE", "usage": usage}
+        return {"model": "cohere", "status": "ok", "text": text, "usage": usage}
     except asyncio.TimeoutError:
         return {"model": "cohere", "status": "TIMED_OUT", "error": "TIMEOUT", "usage": _usage()}
     except Exception as e:
@@ -504,18 +821,18 @@ OPENROUTER_MODEL_IDS = {
 }
 
 
-async def _run_model(model, message, system_prompt, doc_context, history, image_atts, max_tokens, user_keys=None):
+async def _run_model(model, message, system_prompt, doc_context, history, image_atts, max_tokens, user_keys=None, web_search=False):
     """Run a single model. user_keys is a dict of provider->api_key from the frontend."""
     user_keys = user_keys or {}
     openrouter_key = user_keys.get("openrouter")
 
     if model == "claude":
         if user_keys.get("claude"):
-            return await _call_claude(message, system_prompt, doc_context, history, image_atts, max_tokens, user_api_key=user_keys["claude"])
+            return await _call_claude(message, system_prompt, doc_context, history, image_atts, max_tokens, user_api_key=user_keys["claude"], use_search=web_search)
         if openrouter_key:
             return await _call_openai_like("claude", OPENROUTER_MODEL_IDS["claude"], OPENROUTER_URL,
                                            openrouter_key, message, system_prompt, doc_context, history, [], max_tokens)
-        return await _call_claude(message, system_prompt, doc_context, history, image_atts, max_tokens)
+        return await _call_claude(message, system_prompt, doc_context, history, image_atts, max_tokens, use_search=web_search)
 
     if model == "gpt4":
         if user_keys.get("gpt4"):
@@ -527,27 +844,61 @@ async def _run_model(model, message, system_prompt, doc_context, history, image_
 
     if model == "gemini":
         return await _call_gemini(message, system_prompt, doc_context, history, image_atts, max_tokens,
-                                  user_api_key=user_keys.get("gemini"))
+                                  user_api_key=user_keys.get("gemini"), use_search=web_search)
 
     if model == "qwen":
         # Qwen only runs via OpenRouter. Prefer the user's own OpenRouter key for higher limits.
         key = user_keys.get("qwen") or openrouter_key or os.getenv("OPENROUTER_API_KEY")
         return await _call_openai_like("qwen", OPENROUTER_MODEL_IDS["qwen"], OPENROUTER_URL,
-                                       key, message, system_prompt, doc_context, history, [], max_tokens)
+                                       key, message, system_prompt, doc_context, history, [], max_tokens,
+                                       provider="openrouter")
 
     if model == "deepseek":
         key = user_keys.get("deepseek") or os.getenv("DEEPSEEK_API_KEY")
         return await _call_openai_like("deepseek", "deepseek-chat", "https://api.deepseek.com",
-                                       key, message, system_prompt, doc_context, history, [], max_tokens)
+                                       key, message, system_prompt, doc_context, history, [], max_tokens,
+                                       provider="deepseek")
 
     if model == "groq":
         key = user_keys.get("groq") or os.getenv("GROQ_API_KEY")
-        return await _call_openai_like("groq", "llama-3.3-70b-versatile", "https://api.groq.com/openai/v1",
+        # Groq retired llama-3.3-70b-versatile; the id now 404s. The key stays
+        # "groq" because it is written into validations.model, but note that it
+        # no longer denotes the same model — rows recorded before 2026-10-01
+        # are Llama 3.3 and should be analysed separately from later ones.
+        return await _call_openai_like("groq", GROQ_MODEL, "https://api.groq.com/openai/v1",
                                        key, message, system_prompt, doc_context, history, [], max_tokens)
 
     if model == "cohere":
         key = user_keys.get("cohere") or os.getenv("COHERE_API_KEY")
         return await _call_cohere(message, system_prompt, doc_context, history, image_atts, max_tokens, user_api_key=key)
+
+    spec = EXTRA_MODELS.get(model)
+    if spec:
+        provider = spec["provider"]
+        if provider == "anthropic":
+            return await _call_claude(message, system_prompt, doc_context, history, image_atts,
+                                      max_tokens, user_api_key=user_keys.get("claude"),
+                                      model_id=spec["id"], model_key=model, use_search=web_search)
+        if provider == "openai":
+            key = user_keys.get("gpt4") or os.getenv("OPENAI_API_KEY")
+            return await _call_openai_like(model, spec["id"], None, key,
+                                           message, system_prompt, doc_context, history, image_atts, max_tokens,
+                                           token_param=spec.get("token_param", "max_tokens"))
+        if provider == "deepseek":
+            key = user_keys.get("deepseek") or os.getenv("DEEPSEEK_API_KEY")
+            return await _call_openai_like(model, spec["id"], "https://api.deepseek.com", key,
+                                           message, system_prompt, doc_context, history, [], max_tokens,
+                                           provider="deepseek")
+        if provider == "google":
+            return await _call_gemini(message, system_prompt, doc_context, history, image_atts, max_tokens,
+                                      user_api_key=user_keys.get("gemini"),
+                                      model_id=spec["id"], model_key=model,
+                                      use_search=web_search and spec.get("search", True))
+        if provider == "openrouter":
+            key = user_keys.get("qwen") or openrouter_key or os.getenv("OPENROUTER_API_KEY")
+            return await _call_openai_like(model, spec["id"], OPENROUTER_URL, key,
+                                           message, system_prompt, doc_context, history, [], max_tokens,
+                                           provider="openrouter")
 
     return {"model": model, "status": "error", "error": "UNKNOWN_MODEL", "usage": _usage()}
 
@@ -635,7 +986,7 @@ def _sse(event: str, data: dict) -> str:
 
 def _stream_models(models, message, full_message, system_prompt, doc_context,
                    histories, history, image_atts, max_tokens, session_id, user, mode,
-                   user_keys=None, gated_models=None):
+                   user_keys=None, gated_models=None, web_search=False):
     """
     Generator of SSE frames. A background thread runs all model calls
     concurrently in its own event loop and pushes each result onto a
@@ -669,7 +1020,8 @@ def _stream_models(models, message, full_message, system_prompt, doc_context,
                     return
             try:
                 res = await _run_model(m, full_message, system_prompt, doc_context,
-                                       histories.get(m, history), image_atts, max_tokens, user_keys)
+                                       histories.get(m, history), image_atts, max_tokens, user_keys,
+                                       web_search=web_search)
             except Exception as e:
                 res = {"model": m, "status": "error", "error": str(e), "usage": _usage()}
             results[m] = res
@@ -713,6 +1065,9 @@ def ask():
     message     = (data.get("message") or "").strip()
     models      = data.get("models") or ["gemini"]
     mode        = data.get("mode", "normal")
+    # Opt-in: the search tool adds ~2,200 input tokens to every message and each
+    # search is billed, so it stays off unless the request asks for it.
+    web_search  = bool(data.get("web_search"))
     session_id  = data.get("session_id")
     history     = data.get("history", [])         # shared fallback history
     histories   = data.get("histories") or {}      # optional per-model history
@@ -720,9 +1075,12 @@ def ask():
 
     user_keys  = data.get("user_keys") or {}   # {model: api_key} from frontend localStorage
 
-    models = [m for m in models if m in VALID_MODELS]
+    models = list(dict.fromkeys(m for m in models if m in VALID_MODELS))
     if not models:
         return jsonify({"error": "NO_VALID_MODELS"}), 400
+    if len(models) > MAX_MODELS_PER_REQUEST:
+        return jsonify({"error": "TOO_MANY_MODELS",
+                        "message": f"At most {MAX_MODELS_PER_REQUEST} models per question"}), 400
     if not message and not attachments:
         return jsonify({"error": "MISSING_MESSAGE"}), 400
 
@@ -739,11 +1097,15 @@ def ask():
     image_atts = [a for a in attachments if a.get("file_type") == "image"]
 
     docs = _persist_and_load_docs(session_id, user, text_atts)
-    doc_context = _build_document_context(docs, session_id, message)
+    doc_context, passages = _build_document_context(docs, session_id, message)
     # Docs are delivered via doc_context (persisted + retrieved). Only inline them
     # into the message when there's no session to persist to — avoids sending the
     # document text twice.
     full_message = message if (session_id and docs) else _build_full_message(message, text_atts)
+    if passages:
+        # Only this turn sees them: history carries the question alone, so old
+        # passages never pile up in later turns.
+        full_message = f"{passages}\n\n---\n\n{full_message}"
 
     # Streaming path: emit each model's result over SSE as it completes. Gated
     # quota checks happen inside the worker, concurrently with free models.
@@ -751,7 +1113,7 @@ def ask():
         return Response(
             _stream_models(models, message, full_message, system_prompt, doc_context,
                            histories, history, image_atts, max_tokens, session_id, user, mode,
-                           user_keys, gated_requested),
+                           user_keys, gated_requested, web_search=web_search),
             mimetype="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -762,7 +1124,8 @@ def ask():
 
     async def run():
         tasks = [_run_model(m, full_message, system_prompt, doc_context,
-                            histories.get(m, history), image_atts, max_tokens, user_keys)
+                            histories.get(m, history), image_atts, max_tokens, user_keys,
+                            web_search=web_search)
                  for m in run_models]
         done = await asyncio.gather(*tasks, return_exceptions=True)
         out = {}

@@ -10,3 +10,4 @@ python-dotenv
 pymupdf
 python-docx
 scipy
+httpx

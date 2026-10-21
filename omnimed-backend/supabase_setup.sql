@@ -82,6 +82,42 @@ alter table validations add column if not exists verdict      text; -- numeric 1
 alter table validations drop constraint if exists verdict_check;
 alter table validations add column if not exists submitted_by text;
 
+-- ── Three-layer validation ────────────────────────────────
+-- Three independent measurements of the same answer, deliberately kept in
+-- separate columns and never merged into a single score:
+--
+--   db_*   Layer 1 — deterministic. Do the cited PMIDs/DOIs exist, and do
+--          those papers actually concern the claim? Computed from PubMed and
+--          Crossref, with no model involved.
+--   ai_*   Layer 2 — a different model's rubric score of the answer. Useful
+--          but not independent: models scoring models is circular, and models
+--          prefer their own output. Treated as a hypothesis, not ground truth.
+--   verdict Layer 3 — the researcher's wet-lab result. The only ground truth.
+--
+-- Merging them would destroy the question the project exists to answer:
+-- does the automated score predict the wet-lab outcome? That is only
+-- answerable while the three remain separately recoverable.
+alter table validations add column if not exists db_checked        int;
+alter table validations add column if not exists db_verified       int;
+alter table validations add column if not exists db_fabricated     int;
+alter table validations add column if not exists db_mismatched     int;
+alter table validations add column if not exists db_hallucination_rate numeric;
+alter table validations add column if not exists db_miscitation_rate   numeric;
+alter table validations add column if not exists db_detail         jsonb;
+alter table validations add column if not exists db_checked_at     timestamp with time zone;
+
+alter table validations add column if not exists ai_score          int;
+alter table validations add column if not exists ai_dimensions     jsonb;
+alter table validations add column if not exists ai_rationale      text;
+alter table validations add column if not exists ai_red_flags      jsonb;
+alter table validations add column if not exists ai_judge_model    text;
+-- Whether the judge was shown the Layer 1 findings. It usually is, because an
+-- ungrounded judge guesses at whether a PMID resolves. That makes ai_score
+-- partly a function of db_*, which any correlation analysis has to account
+-- for — so it is recorded rather than assumed.
+alter table validations add column if not exists ai_saw_verification boolean;
+alter table validations add column if not exists ai_scored_at      timestamp with time zone;
+
 -- ── Step 2: Profiles table (tracks all registered users) ──
 create table if not exists profiles (
   id         uuid primary key references auth.users(id) on delete cascade,
@@ -411,3 +447,32 @@ as $$
   order by embedding <=> p_query_embedding
   limit p_match_count;
 $$;
+
+-- ══════════════════════════════════════════════════════════
+--  Step 13: Deleting a conversation keeps its research data.
+--  validations, comparisons and extractions reference sessions
+--  with no ON DELETE rule, so Postgres refused to delete any
+--  session that had been scored ("still referenced from table
+--  validations") and the chat came back on reload. The rows are
+--  detached instead of deleted: a wet-lab verdict is ground
+--  truth for the reliability statistics and must outlive the
+--  chat it was entered in. Safe to re-run.
+-- ══════════════════════════════════════════════════════════
+do $$
+declare r record;
+begin
+  for r in
+    select c.conname, c.conrelid::regclass as tbl
+    from pg_constraint c
+    where c.contype = 'f'
+      and c.confrelid = 'public.sessions'::regclass
+      and c.conrelid in (select to_regclass(t) from unnest(array[
+            'public.validations', 'public.comparisons', 'public.extractions']) t)
+      and c.confdeltype <> 'n'          -- 'n' = already ON DELETE SET NULL
+  loop
+    execute format('alter table %s drop constraint %I', r.tbl, r.conname);
+    execute format('alter table %s add constraint %I foreign key (session_id) '
+                   'references public.sessions(session_id) on delete set null',
+                   r.tbl, r.conname);
+  end loop;
+end $$;

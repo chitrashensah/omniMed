@@ -105,22 +105,847 @@
   border-color: var(--border);
 }
 
-/* ── Message area ── */
-.chat-messages {
-  flex: 1;
-  overflow-y: auto;
-  padding: 28px 20px;
+/* ── Turn navigator ──
+   Response lengths differ per model, so turn N sits at a different offset in
+   every box. These pills anchor on the turn element itself, which is what
+   actually lines the answers up for comparison. */
+.chat-turnbar {
   display: flex;
-  flex-direction: column;
-  gap: 22px;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 20px;
+  border-bottom: 1px solid var(--border-light);
   background: var(--bg);
+  flex-shrink: 0;
+}
+.chat-turnbar-label {
+  font-family: var(--font-body, Inter, sans-serif);
+  font-size: 0.7rem;
+  color: var(--text-slate);
+  white-space: nowrap;
+}
+.chat-turnpills {
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.chat-turnpills::-webkit-scrollbar { display: none; }
+.chat-turnpill {
+  min-width: 24px;
+  height: 24px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-muted);
+  border-radius: 6px;
+  font-size: 0.72rem;
+  font-family: var(--font-body, Inter, sans-serif);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all 0.15s;
+}
+.chat-turnpill:hover {
+  border-color: var(--primary);
+  color: var(--text);
+}
+.chat-turnpill--active {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: var(--text-on-dark);
+  font-weight: 600;
 }
 
-.chat-messages::-webkit-scrollbar { width: 4px; }
-.chat-messages::-webkit-scrollbar-track { background: transparent; }
-.chat-messages::-webkit-scrollbar-thumb {
-  background: var(--border);
+/* ── Council verdict ──
+   The answer first, at a size you cannot miss, then the supporting detail.
+   The old synthesis was uniform prose, so the conclusion was buried in it. */
+.council { display: flex; flex-direction: column; }
+
+.council-headline {
+  font-family: var(--font-display, Inter, sans-serif);
+  font-size: 0.95rem;
+  font-weight: 650;
+  line-height: 1.35;
+  color: var(--text);
+  margin: 2px 0 7px;
+}
+.council-summary {
+  font-family: var(--font-body, Inter, sans-serif);
+  font-size: 0.74rem;
+  line-height: 1.5;
+  color: var(--text-muted);
+  margin: 0 0 10px;
+}
+
+.council-list { list-style: none; margin: 0 0 8px; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.council-cand {
+  padding: 7px 9px;
+  border-radius: 6px;
+  background: var(--surface);
+  border-left: 3px solid var(--border);
+}
+.council-cand--high     { border-left-color: #22c55e; }
+.council-cand--moderate { border-left-color: #f59e0b; }
+.council-cand--low      { border-left-color: var(--border); }
+
+.council-cand-top { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
+.council-rank {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.6rem;
+  color: var(--text-slate);
+  flex: 0 0 auto;
+}
+.council-name {
+  font-family: var(--font-body, Inter, sans-serif);
+  font-size: 0.8rem;
+  font-weight: 650;
+  color: var(--text);
+}
+.council-conf {
+  font-family: var(--font-body, Inter, sans-serif);
+  font-size: 0.55rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border-radius: 999px;
+}
+.council-conf--high     { background: #dcfce7; color: #15803d; }
+.council-conf--moderate { background: #fef3c7; color: #b45309; }
+.council-conf--low      { background: var(--bg-secondary); color: var(--text-slate); }
+.council-models {
+  margin-left: auto;
+  font-family: var(--font-body, Inter, sans-serif);
+  font-size: 0.6rem;
+  color: var(--text-slate);
+  white-space: nowrap;
+  cursor: help;
+}
+.council-why {
+  font-family: var(--font-body, Inter, sans-serif);
+  font-size: 0.7rem;
+  line-height: 1.4;
+  color: var(--text-muted);
+  margin-top: 3px;
+}
+.council-caveat {
+  font-family: var(--font-body, Inter, sans-serif);
+  font-size: 0.66rem;
+  line-height: 1.4;
+  color: #b45309;
+  margin-top: 3px;
+}
+
+.council-more {
+  align-self: flex-start;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  border-radius: 5px;
+  font-family: var(--font-body, Inter, sans-serif);
+  font-size: 0.66rem;
+  padding: 3px 9px;
+  cursor: pointer;
+  margin-bottom: 4px;
+}
+.council-more:hover { color: var(--text); border-color: var(--primary); }
+
+.council-detail { margin-bottom: 4px; }
+.council-detail-h {
+  font-family: var(--font-body, Inter, sans-serif);
+  font-size: 0.6rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-slate);
+  margin: 7px 0 3px;
+}
+.council-bullets {
+  margin: 0; padding-left: 15px;
+  font-family: var(--font-body, Inter, sans-serif);
+  font-size: 0.68rem;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+.council-bullets li { margin-bottom: 3px; }
+
+[data-theme="dark"] .council-caveat { color: #fbbf24; }
+[data-theme="dark"] .council-conf--high     { background: rgba(34,197,94,0.16);  color: #4ade80; }
+[data-theme="dark"] .council-conf--moderate { background: rgba(245,158,11,0.16); color: #fbbf24; }
+
+/* ── Session scoreboard ──
+   Sits between the turn bar and the grid rather than inside a box: it is about
+   all the models at once, so it does not belong to any one of them. */
+.chat-scoreboard-btn {
+  margin-left: auto;
+  flex-shrink: 0;
+  padding: 3px 12px;
+  border-radius: 9999px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font-body, Inter, sans-serif);
+  font-size: 0.7rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.chat-scoreboard-btn:hover { color: var(--text); border-color: var(--primary); }
+.chat-scoreboard-btn--on {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: var(--text-on-dark);
+}
+
+.scoreboard {
+  flex-shrink: 0;
+  margin: 0 20px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-light);
+  border-radius: 8px;
+  background: var(--panel-bg);
+  max-height: 34vh;
+  overflow-y: auto;
+}
+.scoreboard-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-family: var(--font-body, Inter, sans-serif);
+  font-size: 0.78rem;
+  color: var(--text);
+}
+.scoreboard-close {
+  border: none;
+  background: none;
+  color: var(--text-slate);
+  cursor: pointer;
+  font-size: 0.8rem;
+  line-height: 1;
+  padding: 2px 4px;
+}
+.scoreboard-close:hover { color: var(--text); }
+
+/* Capped rather than full-width: stretched across a desktop the numeric
+   columns ended up inches from the bar they describe, which is unreadable as
+   a comparison. The model column absorbs any slack. */
+.scoreboard-table {
+  width: 100%;
+  max-width: 660px;
+  border-collapse: collapse;
+  font-family: var(--font-body, Inter, sans-serif);
+  font-size: 0.7rem;
+}
+.scoreboard-table th:not(:first-child),
+.scoreboard-table td:not(:first-child) { width: 1%; white-space: nowrap; }
+.scoreboard-table th {
+  text-align: left;
+  font-weight: 600;
+  font-size: 0.62rem;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--text-slate);
+  padding: 0 8px 5px 0;
+  border-bottom: 1px solid var(--border-light);
+  white-space: nowrap;
+}
+.scoreboard-table td {
+  padding: 5px 8px 5px 0;
+  border-bottom: 1px solid var(--border-light);
+  color: var(--text-muted);
+  vertical-align: middle;
+}
+.scoreboard-table tr:last-child td { border-bottom: none; }
+.sb-model { color: var(--text); font-weight: 500; white-space: nowrap; }
+.sb-dot {
+  display: inline-block;
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: baseline;
+}
+.sb-bar {
+  display: inline-block;
+  width: 84px; height: 5px;
+  border-radius: 3px;
+  background: var(--border-light);
+  overflow: hidden;
+  vertical-align: middle;
+  margin-right: 7px;
+}
+.sb-fill { display: block; height: 100%; border-radius: 3px; background: var(--text-slate); }
+.sb-fill--ok   { background: #22c55e; }
+.sb-fill--warn { background: #f59e0b; }
+.sb-fill--bad  { background: #ef4444; }
+.sb-fill--unknown { background: var(--border); }
+.sb-pct { font-family: var(--font-mono, monospace); font-size: 0.68rem; color: var(--text); }
+.sb-ai {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.68rem;
+  font-weight: 700;
+  padding: 1px 6px;
   border-radius: 4px;
+}
+.sb-ai--ok   { background: #dcfce7; color: #15803d; }
+.sb-ai--warn { background: #fef3c7; color: #b45309; }
+.sb-ai--bad  { background: #fee2e2; color: #b91c1c; }
+[data-theme="dark"] .sb-ai--ok   { background: rgba(34,197,94,0.16);  color: #4ade80; }
+[data-theme="dark"] .sb-ai--warn { background: rgba(245,158,11,0.16); color: #fbbf24; }
+[data-theme="dark"] .sb-ai--bad  { background: rgba(239,68,68,0.16);  color: #f87171; }
+.sb-bad  { color: #b91c1c; font-weight: 600; }
+.sb-warn { color: #b45309; font-weight: 600; }
+.sb-n    { font-family: var(--font-mono, monospace); font-size: 0.64rem; color: var(--text-slate); white-space: nowrap; }
+
+[data-theme="dark"] .sb-bad  { color: #f87171; }
+[data-theme="dark"] .sb-warn { color: #fbbf24; }
+
+@media (max-width: 720px) {
+  .scoreboard { margin: 0 12px; }
+  .sb-bar { width: 48px; }
+}
+
+/* Per-model literature options — a labelled strip under each box header.
+   Dashed while unset, so they read as provisional rather than finished. */
+.mbox-tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border-light);
+  flex-shrink: 0;
+  /* Fixed height so the conclusion box, which has no selects, still starts its
+     content at the same eye level as the model boxes. */
+  min-height: 35px;
+  box-sizing: border-box;
+}
+.mbox-toolnote {
+  font-family: var(--font-body, Inter, sans-serif);
+  font-size: 0.64rem;
+  color: var(--text-slate);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mbox-tool {
+  appearance: none;
+  -webkit-appearance: none;
+  flex: 1 1 0;
+  min-width: 0;
+  width: auto;
+  padding: 3px 20px 3px 7px;
+  border: 1px dashed var(--border);
+  border-radius: 5px;
+  background-color: transparent;
+  color: var(--text-muted);
+  font-family: var(--font-body, Inter, sans-serif);
+  font-size: 0.66rem;
+  line-height: 14px;
+  cursor: pointer;
+  text-overflow: ellipsis;
+  background-image:
+    url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 14 14'%3E%3Cpath d='M3.5 5.5L7 9L10.5 5.5' stroke='%23000' stroke-opacity='0.55' stroke-width='2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 4px center;
+  background-size: 11px;
+  transition: all 0.15s;
+}
+.mbox-tool:hover { border-color: var(--primary); color: var(--text); }
+.mbox-tool:focus { outline: 2px solid var(--action-blue); outline-offset: 1px; }
+.mbox-tool--on {
+  border-style: solid;
+  border-color: var(--action-blue);
+  background-color: var(--pale-blue);
+  color: var(--action-blue);
+  font-weight: 600;
+}
+/* Sits on the same row as the selects: on its own line it made boxes with an
+   option set taller than their neighbours, which broke the grid's even rows. */
+.mbox-optnote {
+  font-family: var(--font-body, Inter, sans-serif);
+  font-size: 0.58rem;
+  font-style: italic;
+  color: var(--text-slate);
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+/* ── Fixed box grid ──
+   The page itself does not scroll. Each box owns its own scroll container, so
+   a wheel event is never ambiguous about what it should move — which is what
+   caused scroll to jump between the page and a panel before. */
+.chat-grid {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(var(--cols, 3), minmax(0, 1fr));
+  grid-auto-rows: minmax(0, 1fr);
+  gap: 12px;
+  padding: 14px 20px;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.mbox {
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.mbox-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-bottom: 2px solid;
+  flex-shrink: 0;
+  background: rgba(255,255,255,0.03);
+}
+
+.mbox-select {
+  appearance: none;
+  -webkit-appearance: none;
+  border: none;
+  border-radius: 5px;
+  /* index.css sets a global `select { width: 100% }`; without this the badge
+     stretches the whole header instead of hugging the model name. */
+  width: auto;
+  flex: 0 1 auto;
+  min-width: 0;
+  padding: 3px 22px 3px 8px;
+  font-family: var(--font-body, Inter, sans-serif);
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  max-width: 100%;
+  text-overflow: ellipsis;
+  /* A background SVG cannot resolve `currentColor`, so the chevron is a fixed
+     dark stroke — it reads on every one of the pale model tints. It is drawn
+     larger and on its own tinted well so the badge reads as a control rather
+     than a label. */
+  background-image:
+    url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 14 14'%3E%3Cpath d='M3.5 5.5L7 9L10.5 5.5' stroke='%23000' stroke-opacity='0.8' stroke-width='2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 5px center;
+  background-size: 13px;
+  border: 1px solid rgba(0,0,0,0.18);
+  box-shadow: inset -22px 0 0 -1px rgba(0,0,0,0.06);
+  transition: filter 0.15s, box-shadow 0.15s;
+}
+.mbox-select:hover {
+  filter: brightness(0.95);
+  box-shadow: 0 1px 4px rgba(0,0,0,0.18);
+}
+.mbox-select:focus { outline: 2px solid var(--action-blue); outline-offset: 1px; }
+
+/* "Model" label — makes it obvious the badge beside it is a control and not
+   just a heading. */
+.mbox-head-hint {
+  font-family: var(--font-body, Inter, sans-serif);
+  font-size: 0.6rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-slate);
+  flex-shrink: 0;
+}
+/* A <span> and a <select> compute different intrinsic heights from the same
+   padding, which left the conclusion header taller than the model headers and
+   knocked the boxes out of horizontal alignment. Pin the line box so both
+   render identically. */
+.mbox-select,
+.mbox-select--static { line-height: 15px; }
+
+.mbox-select--static {
+  display: inline-block;
+  background-image: none;
+  padding-right: 8px;
+  background: var(--pale-blue);
+  color: var(--action-blue);
+  border-color: rgba(0,0,0,0.18);
+  box-shadow: none;
+}
+
+.mbox-max {
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: var(--text-slate);
+  font-size: 0.85rem;
+  cursor: pointer;
+  padding: 2px 5px;
+  border-radius: 4px;
+  flex-shrink: 0;
+  line-height: 1;
+}
+.mbox-max:hover { background: rgba(255,255,255,0.08); color: var(--text); }
+
+/* The only scrolling surface on the page. */
+.mbox-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 10px 12px;
+}
+.mbox-body::-webkit-scrollbar { width: 4px; }
+.mbox-body::-webkit-scrollbar-track { background: transparent; }
+.mbox-body::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,0.14);
+  border-radius: 3px;
+}
+
+.mbox-turn { padding-bottom: 14px; }
+.mbox-turn + .mbox-turn {
+  border-top: 1px solid var(--border-light);
+  padding-top: 14px;
+}
+
+/* The question is repeated in every box so each one reads as a full thread. */
+.mbox-q {
+  font-family: var(--font-body, Inter, sans-serif);
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  background: var(--bg-secondary);
+  border-radius: 6px;
+  padding: 6px 9px;
+  margin-bottom: 9px;
+  word-break: break-word;
+}
+
+.mbox-q-atts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 5px;
+}
+.mbox-q-att {
+  font-size: 0.68rem;
+  color: var(--text-slate);
+  background: var(--bg);
+  border-radius: 4px;
+  padding: 1px 5px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mbox-notqueried,
+.mbox-empty {
+  font-family: var(--font-body, Inter, sans-serif);
+  font-size: 0.78rem;
+  font-style: italic;
+  color: var(--text-slate);
+  margin: 0;
+}
+.mbox-empty { padding: 6px 2px; }
+
+.mbox-synth {
+  margin-left: 8px;
+  color: var(--text-slate);
+  font-size: 0.78rem;
+}
+
+.mbox-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+.mbox-act {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-slate);
+  border-radius: 5px;
+  font-size: 0.75rem;
+  cursor: pointer;
+  padding: 2px 7px;
+  line-height: 1.4;
+}
+.mbox-act:hover { color: var(--text); border-color: var(--primary); }
+
+/* Web search toggle. Off by default — it is a real per-message cost, so the
+   off state is the quiet one and the on state is deliberately conspicuous. */
+.query-opt {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  padding: 4px 10px;
+  border-radius: 9999px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font-body, Inter, sans-serif);
+  font-size: 0.6875rem;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s;
+}
+.query-opt:hover:not(:disabled) { border-color: var(--primary); color: var(--text); }
+.query-opt:disabled { opacity: 0.4; cursor: not-allowed; }
+.query-opt--on {
+  border-color: var(--action-blue);
+  color: var(--action-blue);
+  background: var(--pale-blue);
+  font-weight: 600;
+}
+
+/* Optional question that steers the synthesis only. */
+.concl-ask { display: flex; flex-direction: column; gap: 7px; }
+.concl-ask-input {
+  width: 100%;
+  resize: vertical;
+  min-height: 46px;
+  padding: 7px 9px;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  background: var(--input-bg);
+  color: var(--text);
+  font-family: var(--font-body, Inter, sans-serif);
+  font-size: 0.75rem;
+  line-height: 1.45;
+}
+.concl-ask-input::placeholder { color: var(--text-slate); }
+.concl-ask-input:focus {
+  outline: none;
+  border-style: solid;
+  border-color: var(--action-blue);
+}
+.concl-ask-input:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Echo of the question a saved conclusion was generated with. */
+.concl-asked {
+  font-family: var(--font-body, Inter, sans-serif);
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  background: var(--pale-blue);
+  border-radius: 6px;
+  padding: 6px 9px;
+  margin-bottom: 9px;
+}
+.concl-asked-label {
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--action-blue);
+  margin-right: 5px;
+}
+
+/* ── Citation check ──
+   The button colours by worst finding; the panel breaks to full width inside
+   the flex actions row. */
+.cite-btn { white-space: nowrap; }
+.cite-btn--ok   { color: #15803d; border-color: #86efac; background: #f0fdf4; }
+.cite-btn--warn { color: #b45309; border-color: #fcd34d; background: #fffbeb; }
+.cite-btn--bad  { color: #b91c1c; border-color: #fca5a5; background: #fef2f2; }
+
+/* The citation check and the AI score sit side by side and previously looked
+   identical — two amber pills reading as the same kind of claim. They are not:
+   one is a database lookup, the other is a model's opinion. The dotted border
+   marks the opinion, so the difference survives even when both are amber. */
+.cite-btn--ai { border-style: dashed; }
+.cite-btn--ai:not(.cite-btn--ok):not(.cite-btn--warn):not(.cite-btn--bad) {
+  color: #6d28d9; border-color: #c4b5fd; background: #f5f3ff;
+}
+
+.cite-panel {
+  flex: 0 0 100%;              /* own row beneath Copy / Score */
+  margin-top: 8px;
+  padding: 9px 10px;
+  border: 1px solid var(--border-light);
+  border-radius: 6px;
+  background: var(--bg-secondary);
+}
+
+.cite-summary { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 8px; }
+.cite-stat {
+  font-family: var(--font-body, Inter, sans-serif);
+  font-size: 0.62rem;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 9999px;
+  background: var(--surface);
+  color: var(--text-muted);
+}
+.cite-stat--ok   { background: #dcfce7; color: #15803d; }
+.cite-stat--warn { background: #fef3c7; color: #b45309; }
+.cite-stat--bad  { background: #fee2e2; color: #b91c1c; }
+
+.cite-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.cite-item {
+  padding: 6px 8px;
+  border-radius: 5px;
+  border-left: 3px solid var(--border);
+  background: var(--surface);
+}
+.cite-item--ok      { border-left-color: #22c55e; }
+.cite-item--warn    { border-left-color: #f59e0b; }
+.cite-item--bad     { border-left-color: #ef4444; }
+.cite-item--unknown { border-left-color: var(--border); }
+
+.cite-id {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-family: var(--font-mono, monospace);
+  font-size: 0.64rem;
+  color: var(--text);
+}
+/* The identifier was the loudest thing in the row and is the least useful —
+   the verdict is what the reader is here for, so the two swap weight. */
+.cite-id a, .cite-ref { color: var(--text-slate); text-decoration: none; font-weight: 400; }
+.cite-id a:hover { color: var(--action-blue); text-decoration: underline; }
+.cite-status {
+  font-family: var(--font-body, Inter, sans-serif);
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+.cite-status--ok      { color: #15803d; }
+.cite-status--warn    { color: #b45309; }
+.cite-status--bad     { color: #b91c1c; }
+.cite-status--unknown { color: var(--text-slate); }
+
+/* These hues are tuned for a white surface and drop to 2.8–4.0:1 on the dark
+   one — "Fabricated", the label that matters most, was the worst of them.
+   Lighter variants bring the whole panel back above 4.5:1. */
+[data-theme="dark"] .cite-status--ok      { color: #4ade80; }
+[data-theme="dark"] .cite-status--warn    { color: #fbbf24; }
+[data-theme="dark"] .cite-status--bad     { color: #f87171; }
+[data-theme="dark"] .cite-status--unknown { color: #a1a1b5; }
+[data-theme="dark"] .cite-kind            { color: #a1a1b5; }
+[data-theme="dark"] .cite-reason          { color: #fbbf24; }
+[data-theme="dark"] .ai-overall--ok       { color: #4ade80; }
+[data-theme="dark"] .ai-overall--warn     { color: #fbbf24; }
+[data-theme="dark"] .ai-overall--bad      { color: #f87171; }
+.cite-title {
+  font-family: var(--font-body, Inter, sans-serif);
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  margin-top: 2px;
+  line-height: 1.35;
+}
+/* Author-year citations are matched by search, not resolved by identifier.
+   The chip keeps that difference visible so a fuzzy match is never mistaken
+   for an exact PMID lookup. */
+/* Spelling out "matched on author + year + journal + topic" took a whole line
+   and outweighed the verdict beside it. The marker carries the same meaning at
+   a glance — this was matched, not looked up — with the detail on hover. */
+.cite-kind {
+  font-family: var(--font-body, Inter, sans-serif);
+  font-size: 0.55rem;
+  color: var(--text-slate);
+  border: 1px solid var(--border-light);
+  border-radius: 3px;
+  padding: 0 4px;
+  white-space: nowrap;
+  cursor: help;
+}
+.cite-resolved { color: var(--text-slate); font-style: italic; }
+
+/* One-line verdict so the panel can be read without adding up chips. */
+.cite-head {
+  font-family: var(--font-body, Inter, sans-serif);
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--text);
+  margin: 0 0 7px;
+  line-height: 1.35;
+}
+
+/* ── AI score panel ── */
+.ai-top { display: flex; align-items: center; gap: 10px; margin-bottom: 9px; }
+.ai-overall {
+  font-family: var(--font-display, Inter, sans-serif);
+  font-size: 1.35rem;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--text);
+}
+.ai-overall span { font-size: 0.7rem; font-weight: 500; color: var(--text-slate); }
+.ai-overall--ok   { color: #15803d; }
+.ai-overall--warn { color: #b45309; }
+.ai-overall--bad  { color: #b91c1c; }
+
+/* Bars rather than chips: 3/10 and 9/10 rendered as identical grey pills
+   before, so the weak dimensions — the reason to look at all — disappeared. */
+.ai-dims { display: flex; flex-direction: column; gap: 3px; flex: 1; min-width: 0; }
+.ai-dim { display: flex; align-items: center; gap: 6px; }
+.ai-dim-label {
+  font-family: var(--font-body, Inter, sans-serif);
+  font-size: 0.6rem;
+  color: var(--text-muted);
+  flex: 0 0 62px;
+}
+.ai-dim-track {
+  display: block;
+  flex: 1; height: 4px; border-radius: 2px;
+  background: var(--border-light); overflow: hidden; min-width: 0;
+}
+/* Block, not inline: width has no effect on an inline span, which rendered
+   every bar empty regardless of score. */
+.ai-dim-fill { display: block; height: 100%; border-radius: 2px; background: var(--text-slate); }
+.ai-dim-fill--ok   { background: #22c55e; }
+.ai-dim-fill--warn { background: #f59e0b; }
+.ai-dim-fill--bad  { background: #ef4444; }
+.ai-dim-num {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.6rem;
+  color: var(--text-muted);
+  flex: 0 0 14px;
+  text-align: right;
+}
+
+/* Judge's written reasoning — prose, so it gets normal line length. */
+.ai-rationale {
+  font-family: var(--font-body, Inter, sans-serif);
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  line-height: 1.45;
+  margin: 0 0 8px;
+}
+.cite-reason {
+  font-family: var(--font-body, Inter, sans-serif);
+  font-size: 0.64rem;
+  color: #b45309;
+  margin-top: 3px;
+  line-height: 1.35;
+}
+.cite-none, .cite-foot {
+  font-family: var(--font-body, Inter, sans-serif);
+  font-size: 0.62rem;
+  color: var(--text-slate);
+  margin: 0;
+}
+.cite-foot { margin-top: 8px; font-style: italic; }
+
+[data-theme="light"] .cite-panel { background: var(--bg-tertiary); }
+
+/* Provider-reported model id for this answer — provenance for a scored result. */
+.mbox-served {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.6rem;
+  color: var(--text-slate);
+  margin-left: auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
 }
 
 /* ── Welcome screen ── */
@@ -649,41 +1474,40 @@
 .chat-attach-btn:hover:not(:disabled) { opacity: 0.8; }
 .chat-attach-btn:disabled { opacity: 0.2; cursor: not-allowed; }
 
-/* ── Model selector toggles — pill-outline per model color ── */
-.model-selector {
+
+/* Box count. Model choice itself moved into each box header. */
+.box-count {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 2px;
   flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: 9999px;
+  padding: 2px 4px;
+}
+.box-count-btn {
+  width: 20px;
+  height: 20px;
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  line-height: 1;
+  cursor: pointer;
+  border-radius: 50%;
+}
+.box-count-btn:hover:not(:disabled) { background: var(--bg-secondary); color: var(--text); }
+.box-count-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+.box-count-label {
+  display: flex;
+  align-items: center;
+  font-family: var(--font-body, Inter, sans-serif);
+  font-size: 0.6875rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  padding: 0 2px;
 }
 
-.model-toggle {
-  display: flex;
-  align-items: center;
-  gap: 3px;
-  padding: 4px 9px;
-  border-radius: 9999px;
-  border: 1px solid var(--border);
-  background: transparent;
-  color: var(--text-muted);
-  font-size: 0.6875rem;
-  font-weight: 500;
-  font-family: var(--font-body, Inter, sans-serif);
-  cursor: pointer;
-  transition: all 0.15s;
-  white-space: nowrap;
-  letter-spacing: 0.01em;
-}
-.model-toggle--on {
-  /* filled with model color — set via inline style in JSX */
-  background: var(--bg-secondary);
-}
-.model-toggle--off {
-  opacity: 0.4;
-  border-color: var(--border);
-}
-.model-toggle--off:hover { opacity: 0.7; }
-.model-toggle:disabled { cursor: not-allowed; opacity: 0.25; }
 .model-toggle-badge {
   font-size: 0.58rem;
   font-weight: 700;
@@ -895,10 +1719,13 @@
 }
 
 /* ── Responsive ── */
+/* Below ~1200px three columns drop under ~330px each, which is too narrow to
+   read comfortably, so fall back to two. */
+@media (max-width: 1200px) and (min-width: 769px) {
+  .chat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
 @media (max-width: 900px) {
-  .model-panels-row {
-    grid-template-columns: 1fr;
-  }
   .chat-bubble-user {
     max-width: 88%;
   }
@@ -921,44 +1748,56 @@
     flex-shrink: 0;
   }
 
-  .chat-messages {
-    padding: 16px 12px;
-    gap: 16px;
-  }
-
   .chat-welcome-title { font-size: 1.3rem; }
   .chat-welcome-sub   { font-size: 0.875rem; }
 
   .chat-inputbar { padding: 8px 12px 12px; }
 
   /* Reflow the crowded input row into readable rows on phones:
-     [attach] [prompt]  /  [model toggles — scroll]  /  [textarea] [send] */
+     [attach] [prompt] [box count]  /  [textarea] [send] */
   .chat-input-wrap { flex-wrap: wrap; align-items: center; }
   .chat-attach-btn { order: 1; }
   .prompt-selector { order: 2; }
-  .model-selector {
-    order: 3;
-    width: 100%;
-    gap: 3px;
-    flex-wrap: nowrap;
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
-    scrollbar-width: none;
-    padding-bottom: 2px;
-  }
-  .model-selector::-webkit-scrollbar { display: none; }
-  .model-toggle { font-size: 0.625rem; padding: 3px 7px; flex-shrink: 0; }
-  .chat-textarea { order: 4; flex: 1 1 60%; }
+  .box-count       { order: 3; }
+  .chat-textarea { order: 4; flex: 1 1 100%; }
   .chat-send-btn, .chat-stop-btn { order: 5; }
 
   .chat-att-pills { justify-content: flex-start; }
 
   .conclusion-card { padding: 12px 14px; }
 
-  .model-panels-row { grid-template-columns: 1fr; }
+  /* A rigid grid cannot work at phone widths. One box fills the screen and
+     swiping moves between models — same per-model thread, one at a time. */
+  .chat-grid {
+    display: flex;
+    grid-template-columns: none;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scroll-snap-type: x mandatory;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    padding: 10px 12px;
+    gap: 10px;
+  }
+  .chat-grid::-webkit-scrollbar { display: none; }
+  .mbox {
+    min-width: 100%;
+    scroll-snap-align: center;
+  }
+  .chat-turnbar { padding: 6px 12px; }
 }
 
 /* ── Light-mode panel overrides ── */
+[data-theme="light"] .mbox-head {
+  background: rgba(0,0,0,0.03);
+}
+[data-theme="light"] .mbox-body::-webkit-scrollbar-thumb {
+  background: rgba(0,0,0,0.14);
+}
+[data-theme="light"] .mbox-max:hover {
+  background: rgba(0,0,0,0.06);
+}
+
 [data-theme="light"] .model-panel-header {
   background: rgba(0,0,0,0.03);
 }
@@ -1028,6 +1867,18 @@
 }
 
 /* ── Wet Lab Score ── */
+/* Inline variant: sits under an individual answer rather than in the box
+   header, so it must not push itself to the right or shout for attention.
+   Doubled class so it beats `.wl-score-btn`'s `margin-left: auto` regardless
+   of which rule comes first in the file. */
+.wl-score-btn.wl-score-btn--inline {
+  margin-left: 0;
+  padding: 2px 9px;
+  font-size: 0.68rem;
+  border-radius: 5px;
+  border-width: 1px;
+}
+
 .wl-score-btn {
   margin-left: auto;
   flex-shrink: 0;

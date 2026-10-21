@@ -1,10 +1,25 @@
 const STORAGE_KEY = 'omnimed_user_api_keys'
 
+// Several models share one provider key: every Anthropic model authenticates
+// with the `claude` key, every OpenAI model with `gpt4`. Without this mapping a
+// stored Anthropic key wouldn't count for Opus 5 and the UI would keep showing
+// the 5/day badge. Keys not listed here use their own name as the provider.
+const PROVIDER_FOR_MODEL = {
+  opus5: 'claude', opus48: 'claude', sonnet5: 'claude', fable5: 'claude',
+  gpt55: 'gpt4', gpt54mini: 'gpt4',
+  deepseek_pro: 'deepseek', deepseek_flash: 'deepseek',
+}
+
+export function providerForModel(modelKey) {
+  return PROVIDER_FOR_MODEL[modelKey] || modelKey
+}
+
 export const KEY_CONFIGS = {
   openrouter: {
     label: 'OpenRouter',
     description: 'One key for Claude, GPT-4o, and all other models',
     models: ['claude', 'gpt4', 'deepseek', 'groq', 'qwen', 'cohere'],
+    note: 'Covers every Anthropic and OpenAI model in the list.',
     url: 'https://openrouter.ai/keys',
     steps: [
       'Go to openrouter.ai and sign up',
@@ -16,8 +31,8 @@ export const KEY_CONFIGS = {
   },
   claude: {
     label: 'Anthropic (Claude)',
-    description: 'Direct Anthropic API key for Claude only',
-    models: ['claude'],
+    description: 'Direct Anthropic API key — covers every Claude model',
+    models: ['claude', 'opus5', 'opus48', 'sonnet5', 'fable5'],
     url: 'https://console.anthropic.com/settings/keys',
     steps: [
       'Go to console.anthropic.com and sign up',
@@ -29,8 +44,8 @@ export const KEY_CONFIGS = {
   },
   gpt4: {
     label: 'OpenAI (GPT-4o)',
-    description: 'Direct OpenAI API key for GPT-4o only',
-    models: ['gpt4'],
+    description: 'Direct OpenAI API key — covers every GPT model',
+    models: ['gpt4', 'gpt55', 'gpt54mini'],
     url: 'https://platform.openai.com/api-keys',
     steps: [
       'Go to platform.openai.com and sign up',
@@ -43,7 +58,7 @@ export const KEY_CONFIGS = {
   deepseek: {
     label: 'DeepSeek',
     description: 'Your own DeepSeek key for higher limits',
-    models: ['deepseek'],
+    models: ['deepseek', 'deepseek_pro', 'deepseek_flash'],
     url: 'https://platform.deepseek.com/api_keys',
     steps: [
       'Go to platform.deepseek.com and sign up',
@@ -136,5 +151,5 @@ export function buildUserKeys() {
 /** Returns true if the model has a usable key (own key or openrouter) */
 export function modelHasKey(modelKey) {
   const keys = getAllKeys()
-  return !!(keys[modelKey] || keys.openrouter)
+  return !!(keys[providerForModel(modelKey)] || keys.openrouter)
 }

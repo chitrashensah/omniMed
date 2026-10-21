@@ -63,12 +63,17 @@ export async function saveTurn(sessionId, userId, title, msgs) {
   await supabase.from('sessions').update(update).eq('session_id', sessionId)
 }
 
+// Supabase reports failures in the result, it does not throw. Callers that
+// ignored the result showed a delete as done while the row was still there.
 export async function renameConversation(sessionId, title) {
   if (!isUuid(sessionId)) return
-  await supabase.from('sessions').update({ title }).eq('session_id', sessionId)
+  const { error } = await supabase.from('sessions').update({ title }).eq('session_id', sessionId)
+  if (error) throw error
 }
 
 export async function deleteConversation(sessionId) {
   if (!isUuid(sessionId)) return
-  await supabase.from('sessions').delete().eq('session_id', sessionId)  // cascades to messages
+  // Messages cascade; validations are detached, not deleted (supabase_setup.sql, Step 13)
+  const { error } = await supabase.from('sessions').delete().eq('session_id', sessionId)
+  if (error) throw error
 }

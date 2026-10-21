@@ -8,7 +8,7 @@ from routes.auth import require_auth
 
 compare_bp = Blueprint("compare", __name__)
 
-def build_synthesis_prompt(model_labels: dict) -> str:
+def build_synthesis_prompt(model_labels: dict, focus: str | None = None) -> str:
     names = list(model_labels.values())
     count = len(names)
     names_str = ", ".join(names[:-1]) + f" and {names[-1]}" if count > 1 else names[0]
@@ -18,7 +18,7 @@ def build_synthesis_prompt(model_labels: dict) -> str:
     )
     agreement_threshold = "all models" if count > 2 else "both models"
 
-    return f"""\
+    base = f"""\
 You are a neutral AI response analyst. {count} AI model{"s" if count > 1 else ""} — {names_str} — each answered the same question independently. Analyze and compare their responses using this exact structure:
 
 ## What each model said
@@ -37,6 +37,24 @@ One concise paragraph: the most reliable answer given the consensus, and which m
 Output plain text with markdown headings as shown above. Do not add extra sections.\
 """
 
+    # An optional question aimed at the synthesis only. It is answered from the
+    # model responses above — the individual models never see it, so this cannot
+    # change what they said, only how their answers are read.
+    if focus and focus.strip():
+        base += f"""
+
+## Answering the reader's question
+Whoever requested this synthesis also asked:
+
+<question>
+{focus.strip()}
+</question>
+
+Answer that question directly in this section, drawing only on what the models above actually said. If their responses do not contain enough to answer it, say so plainly instead of filling the gap from your own knowledge. Keep the sections above unchanged.\
+"""
+
+    return base
+
 
 def run_comparison_logic():
     """Shared logic for /compare and /meta-analysis."""
@@ -45,6 +63,7 @@ def run_comparison_logic():
     session_id      = data.get("session_id")
     model_responses = data.get("model_responses")
     model_labels    = data.get("model_labels", {})
+    focus           = (data.get("focus") or "").strip()[:2000]
 
     if not model_responses or not isinstance(model_responses, dict):
         return jsonify({"error": "MISSING_MODEL_RESPONSES",
@@ -64,7 +83,7 @@ def run_comparison_logic():
         for k, v in valid.items()
     )
 
-    synthesis_prompt = build_synthesis_prompt(labels)
+    synthesis_prompt = build_synthesis_prompt(labels, focus)
     user_message = f"<responses>\n{sections}\n</responses>"
     result = asyncio.run(call_gemini_meta(user_message, None, system_prompt_override=synthesis_prompt))
 
@@ -80,6 +99,7 @@ def run_comparison_logic():
         "status": "ok",
         "session_id": session_id,
         "meta_analysis": result.get("raw_response") or result.get("parsed_json"),
+        "focus": focus or None,
     }), 200
 
 
