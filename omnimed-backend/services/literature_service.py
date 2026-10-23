@@ -561,7 +561,15 @@ NOT_GENES = {
     # a claim "concerns BMJ" was compared with a paper that "concerns CINAHL".
     "BMJ", "JAMA", "NEJM", "PLOS", "PNAS", "JACC", "EHJ", "CINAHL", "EMBASE",
     "MEDLINE", "EPOC", "GRADE", "PRISMA", "WHO", "EU", "UK", "USA", "AHA", "ACC",
-    "ESC", "AASLD", "NCBI", "URL", "HTML", "PDF",
+    "ESC", "AASLD", "NCBI", "URL", "HTML", "PDF", "PMCID",
+    # Disease, drug, cell-type and cell-line abbreviations. "DIC" (doxorubicin-
+    # induced cardiotoxicity) read as a gene made a correct citation look like
+    # one about "DIC" checked against a paper about "AKT, PTEN" (2026-10-23).
+    "DIC", "DOX", "DOXO", "DCM", "HCM", "ICM", "ACM", "AF", "PAH", "IRI", "MIRI",
+    "CM", "CMS", "NRCM", "NRCMS", "NMCM", "NMCMS", "AMVC", "AMVCS", "IPSC",
+    "IPSCS", "HIPSC", "HIPSCS", "MSC", "MSCS", "BMSC", "BMSCS", "BM", "EV", "EVS",
+    "EXO", "EXOS", "AC16", "H9C2", "HL-1", "HUVEC", "HUVECS", "HEK293", "NTA",
+    "TEM",
 }
 
 
@@ -603,6 +611,18 @@ def _rna_entities(text: str) -> set[str]:
     return ents
 
 
+HEADING_RE = re.compile(r"^\s*(?:#{1,6}\s+.+|\*\*[^*\n]+\*\*:?)\s*$")
+
+
+def _section_heading(text: str, pos: int) -> str:
+    """The nearest heading line before pos: a markdown '#' heading or a line
+    that is bold on its own ("**1. miR-9-5p (miRNA)**"). Empty if none."""
+    for line in reversed(text[:max(pos, 0)].splitlines()):
+        if HEADING_RE.match(line):
+            return line.strip()
+    return ""
+
+
 def _claim_context(text: str, marker: str, window: int = 400) -> str:
     """The claim a citation is attached to.
 
@@ -632,6 +652,13 @@ def _claim_context(text: str, marker: str, window: int = 400) -> str:
     # would borrow the previous bullet's miRNA and report a mismatch against a
     # claim the citation was never attached to. Better to report nothing.
     if re.match(r"^(?:[-*•]|\d+[.)])\s", block):
+        # ...unless the list sits under a heading naming the candidate
+        # ("#### miR-495-3p" then "- **Cell lines studied**: … [PMID]"). The
+        # heading scopes every bullet below it, so it is the claim's subject;
+        # without it the bullet was matched on stray acronyms instead.
+        heading = _section_heading(text, start)
+        if _rna_entities(heading):
+            return f"{heading}\n{block}"
         return block
     return text[max(0, i - window): end]
 
@@ -732,8 +759,9 @@ FULLTEXT_CHECKS = 8                    # flagged citations re-checked per answer
 # Bumped whenever a change would give a different verdict on the same answer,
 # so clients holding a saved result from an older checker re-run it instead of
 # showing a stale verdict. 2 = full-text second look, topic-checked Crossref
-# fallback, author-name fixes; 3 = NCBI PubMed Central as a second source.
-CHECKER_VERSION = 3
+# fallback, author-name fixes; 3 = NCBI PubMed Central as a second source;
+# 4 = candidate heading as claim context, disease/cell-line acronyms not genes.
+CHECKER_VERSION = 4
 FULLTEXT_MAX_CHARS = 600_000
 
 
