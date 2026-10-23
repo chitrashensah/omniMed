@@ -36,7 +36,7 @@ ANTHROPIC_SEARCH_TOOL = {"claude-opus-5-5": "web_search_20260209", "claude-sonne
 # Gemini 2.5+ thinks before answering and the reasoning is billed against
 # max_output_tokens, same as Claude. Measured: a 3-part biomedical question
 # spent 860 of 900 tokens thinking and returned a 36-token truncated answer.
-GEMINI_MIN_MAX_TOKENS = 8192
+GEMINI_MIN_MAX_TOKENS = 32768   # was 8,192: a long list was cut off mid-citation
 
 # Same reasoning-budget problem on the OpenAI-compatible providers: Qwen 3.x
 # and the DeepSeek reasoning tiers spend output tokens thinking before any

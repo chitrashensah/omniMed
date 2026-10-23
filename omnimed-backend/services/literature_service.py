@@ -570,6 +570,9 @@ NOT_GENES = {
     "IPSCS", "HIPSC", "HIPSCS", "MSC", "MSCS", "BMSC", "BMSCS", "BM", "EV", "EVS",
     "EXO", "EXOS", "AC16", "H9C2", "HL-1", "HUVEC", "HUVECS", "HEK293", "NTA",
     "TEM",
+    # Molecule classes, not genes ("COVID-19 and RNAs" was matched as a gene).
+    "RNA", "RNAS", "DNA", "MIRNA", "MIRNAS", "LNCRNA", "LNCRNAS", "NCRNA", "NCRNAS",
+    "CIRCRNA", "CIRCRNAS", "MRNA", "MRNAS", "COVID", "COVID-19", "SARS-COV-2", "HIV",
 }
 
 
@@ -612,14 +615,26 @@ def _rna_entities(text: str) -> set[str]:
 
 
 HEADING_RE = re.compile(r"^\s*(?:#{1,6}\s+.+|\*\*[^*\n]+\*\*:?)\s*$")
+# A candidate's title line: optional number, then a short label that is bold
+# or plain, not a "Field: value" bullet ("1. **miR-21 — miRNA**", "miR-21 — miRNA").
+CANDIDATE_LINE_RE = re.compile(r"^(?:\d+[.)]\s+)?(?:\*\*[^*\n]{2,100}\*\*|[^-*•:\n][^:\n]{1,80})\s*$")
+_ITEM_RE = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s")
+HEADING_LOOKBACK = 25                  # lines; a candidate block is rarely longer
 
 
 def _section_heading(text: str, pos: int) -> str:
-    """The nearest heading line before pos: a markdown '#' heading or a line
-    that is bold on its own ("**1. miR-9-5p (miRNA)**"). Empty if none."""
-    for line in reversed(text[:max(pos, 0)].splitlines()):
-        if HEADING_RE.match(line):
-            return line.strip()
+    """The title of the candidate a list item sits under: the nearest '#'
+    heading, bold-only line, or short title line naming an RNA. Empty if none
+    within HEADING_LOOKBACK lines."""
+    for line in list(reversed(text[:max(pos, 0)].splitlines()))[:HEADING_LOOKBACK]:
+        bare = line.strip()
+        if not bare:
+            continue
+        if HEADING_RE.match(bare):
+            return bare
+        if CANDIDATE_LINE_RE.match(bare) and _rna_entities(bare) and not \
+                (_ITEM_RE.match(line) and ":" in bare):
+            return bare
     return ""
 
 
@@ -643,6 +658,15 @@ def _claim_context(text: str, marker: str, window: int = 400) -> str:
         end = len(text)
     block = text[start:end].strip()
 
+    # A detail bullet under a candidate ("1. **miR-21**" then "- Synergy:
+    # complements miR-29 … [PMID]") is about that candidate even when it names
+    # another RNA. Without the title, a correct miR-21 paper cited on that line
+    # was checked against miR-29 alone and reported as off-topic.
+    if re.match(r"^(?:[-*•]|\d+[.)])\s", block):
+        heading = _section_heading(text, start)
+        if heading and heading not in block and _rna_entities(heading):
+            return f"{heading}\n{block}"
+
     if _rna_entities(block):
         return block
 
@@ -652,13 +676,6 @@ def _claim_context(text: str, marker: str, window: int = 400) -> str:
     # would borrow the previous bullet's miRNA and report a mismatch against a
     # claim the citation was never attached to. Better to report nothing.
     if re.match(r"^(?:[-*•]|\d+[.)])\s", block):
-        # ...unless the list sits under a heading naming the candidate
-        # ("#### miR-495-3p" then "- **Cell lines studied**: … [PMID]"). The
-        # heading scopes every bullet below it, so it is the claim's subject;
-        # without it the bullet was matched on stray acronyms instead.
-        heading = _section_heading(text, start)
-        if _rna_entities(heading):
-            return f"{heading}\n{block}"
         return block
     return text[max(0, i - window): end]
 
@@ -760,8 +777,9 @@ FULLTEXT_CHECKS = 8                    # flagged citations re-checked per answer
 # so clients holding a saved result from an older checker re-run it instead of
 # showing a stale verdict. 2 = full-text second look, topic-checked Crossref
 # fallback, author-name fixes; 3 = NCBI PubMed Central as a second source;
-# 4 = candidate heading as claim context, disease/cell-line acronyms not genes.
-CHECKER_VERSION = 4
+# 4 = candidate heading as claim context, disease/cell-line acronyms not genes;
+# 5 = candidate title lines ("1. **miR-21 — miRNA**") count, for every bullet.
+CHECKER_VERSION = 5
 FULLTEXT_MAX_CHARS = 600_000
 
 

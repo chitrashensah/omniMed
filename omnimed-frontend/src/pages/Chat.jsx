@@ -368,7 +368,7 @@ function citationHeadline(r) {
 }
 
 // Matches CHECKER_VERSION in omnimed-backend/services/literature_service.py.
-const CITATION_CHECKER_VERSION = 4
+const CITATION_CHECKER_VERSION = 5
 
 // `since`: the earliest year the box's date range allows, when it has one.
 // Citations older than that are marked, so a model that ignored the range is

@@ -89,12 +89,16 @@ def parse_literature(raw, models: list) -> dict:
         db = opt.get("db")
         if db not in LITERATURE_DATABASES:
             continue
-        years = LITERATURE_RANGES.get(opt.get("dates") or "all")
+        dates = str(opt.get("dates") or "all")
+        years = LITERATURE_RANGES.get(dates)
+        # A year ("2018") as well as a range: researchers say "since 2018".
+        since = (int(dates) if dates.isdigit() and 1900 <= int(dates) <= date.today().year
+                 else date.today().year - years if years else None)
         try:
             papers = max(1, min(int(opt.get("papers")), LITERATURE_PAPERS_MAX))
         except (TypeError, ValueError):
             papers = "auto"                 # no preference: the model decides
-        out[m] = (db, date.today().year - years if years else None, papers)
+        out[m] = (db, since, papers)
     return out
 
 
