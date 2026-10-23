@@ -242,6 +242,11 @@ def literature_searcher(question: str, literature: dict, previous: str = ""):
                 " ".join(attempt)[:300], sources=(db,),
                 limit=limits.get((db, year_from), LITERATURE_PAPERS_MAX),
                 year_from=year_from)
+            # An unreachable database is a failed search, not "no papers":
+            # grounded_message then labels it so instead of telling the
+            # model that nothing on the topic exists.
+            if found.get("unavailable"):
+                raise RuntimeError(f"{db} unavailable")
             if found.get("papers") or len(attempt) <= 3:
                 return found
             attempt = attempt[:max(3, len(attempt) - 2)]

@@ -61,6 +61,9 @@ def literature_search():
         ))
     except Exception as e:
         return jsonify({"error": "SEARCH_FAILED", "message": str(e)[:200]}), 502
+    if result.get("unavailable") and len(result["unavailable"]) == len(sources):
+        return jsonify({"error": "SEARCH_FAILED",
+                        "message": f"Could not reach {', '.join(result['unavailable'])}. Try again shortly."}), 502
 
     return jsonify({"status": "ok", **result}), 200
 

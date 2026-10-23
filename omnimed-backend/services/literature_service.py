@@ -151,15 +151,14 @@ async def search_europepmc(client: httpx.AsyncClient, query: str,
     q = query
     if year_from or year_to:
         q += f" AND (FIRST_PDATE:[{year_from or 1900} TO {year_to or 3000}])"
-    try:
-        r = await client.get(f"{EUROPEPMC}/search", params={
-            "query": q, "format": "json", "pageSize": min(limit, 25),
-            "resultType": "core",
-        })
-        r.raise_for_status()
-        results = r.json().get("resultList", {}).get("result", []) or []
-    except Exception:
-        return []
+    # Errors propagate: search() records the source as unavailable, which an
+    # empty list would hide ("no papers exist" when the database was unreachable).
+    r = await client.get(f"{EUROPEPMC}/search", params={
+        "query": q, "format": "json", "pageSize": min(limit, 25),
+        "resultType": "core",
+    })
+    r.raise_for_status()
+    results = r.json().get("resultList", {}).get("result", []) or []
 
     out = []
     for it in results[:limit]:
@@ -198,26 +197,23 @@ async def search_pubmed(client: httpx.AsyncClient, query: str,
                         year_from: int | None = None,
                         year_to: int | None = None) -> list[Paper]:
     """esearch for PMIDs, then efetch for the records. Two calls by design —
-    NCBI has no combined endpoint."""
+    NCBI has no combined endpoint. Errors propagate, as in search_europepmc."""
     term = query
     if year_from or year_to:
         term += f" AND ({year_from or 1800}:{year_to or 3000}[dp])"
-    try:
-        await _ncbi_limiter.wait()
-        r = await client.get(f"{EUTILS}/esearch.fcgi", params=_ncbi_params(
-            db="pubmed", term=term, retmode="json", retmax=min(limit, 25), sort="relevance"))
-        r.raise_for_status()
-        ids = r.json().get("esearchresult", {}).get("idlist", []) or []
-        if not ids:
-            return []
-
-        await _ncbi_limiter.wait()
-        r2 = await client.get(f"{EUTILS}/efetch.fcgi", params=_ncbi_params(
-            db="pubmed", id=",".join(ids), retmode="xml"))
-        r2.raise_for_status()
-        return _parse_pubmed_xml(r2.text)[:limit]
-    except Exception:
+    await _ncbi_limiter.wait()
+    r = await client.get(f"{EUTILS}/esearch.fcgi", params=_ncbi_params(
+        db="pubmed", term=term, retmode="json", retmax=min(limit, 25), sort="relevance"))
+    r.raise_for_status()
+    ids = r.json().get("esearchresult", {}).get("idlist", []) or []
+    if not ids:
         return []
+
+    await _ncbi_limiter.wait()
+    r2 = await client.get(f"{EUTILS}/efetch.fcgi", params=_ncbi_params(
+        db="pubmed", id=",".join(ids), retmode="xml"))
+    r2.raise_for_status()
+    return _parse_pubmed_xml(r2.text)[:limit]
 
 
 def _parse_pubmed_xml(xml: str) -> list[Paper]:
@@ -299,15 +295,12 @@ async def search_trials(client: httpx.AsyncClient, query: str,
                  if w.lower() not in _STOPWORDS][:3]
         terms = [" OR ".join(words)] if words else [query]
 
-    try:
-        r = await client.get(f"{CTGOV}/studies", params={
-            "query.term": " OR ".join(f"({t})" for t in terms),
-            "pageSize": min(limit, 20),
-        })
-        r.raise_for_status()
-        studies = r.json().get("studies", []) or []
-    except Exception:
-        return []
+    r = await client.get(f"{CTGOV}/studies", params={       # errors propagate, as above
+        "query.term": " OR ".join(f"({t})" for t in terms),
+        "pageSize": min(limit, 20),
+    })
+    r.raise_for_status()
+    studies = r.json().get("studies", []) or []
 
     out = []
     for st in studies[:limit]:
@@ -336,10 +329,12 @@ async def search_trials(client: httpx.AsyncClient, query: str,
 async def search(query: str, sources=SOURCES, limit: int = MAX_RESULTS_DEFAULT,
                  year_from: int | None = None, year_to: int | None = None) -> dict:
     """Query several databases concurrently and return one merged, deduplicated
-    result set. A failing source contributes nothing rather than raising."""
+    result set. A failing source contributes nothing rather than raising, and
+    is listed in `unavailable`; such a result is not cached, so an outage is
+    not remembered as "no papers"."""
     query = (query or "").strip()
     if not query:
-        return {"query": query, "papers": [], "by_source": {}, "cached": False}
+        return {"query": query, "papers": [], "by_source": {}, "unavailable": [], "cached": False}
 
     key = _cache_key("search", query, tuple(sources), limit, year_from, year_to)
     hit = _cache_get(key)
@@ -358,8 +353,10 @@ async def search(query: str, sources=SOURCES, limit: int = MAX_RESULTS_DEFAULT,
 
         settled = await asyncio.gather(*jobs, return_exceptions=True)
 
-    by_source, merged, seen = {}, [], set()
+    by_source, merged, seen, unavailable = {}, [], set(), []
     for name, res in zip(names, settled):
+        if not isinstance(res, list):
+            unavailable.append(name)
         papers = res if isinstance(res, list) else []
         by_source[name] = len(papers)
         for p in papers:
@@ -382,8 +379,9 @@ async def search(query: str, sources=SOURCES, limit: int = MAX_RESULTS_DEFAULT,
                       and (not year_to or int(p.year) <= year_to))]
 
     result = {"query": query, "papers": [p.to_dict() for p in merged],
-              "by_source": by_source, "count": len(merged)}
-    _cache_put(key, result)
+              "by_source": by_source, "count": len(merged), "unavailable": unavailable}
+    if not unavailable:
+        _cache_put(key, result)
     return {**result, "cached": False}
 
 
