@@ -4,6 +4,7 @@ import json
 import queue
 import asyncio
 import threading
+from datetime import date
 import anthropic
 import openai
 import cohere
@@ -14,16 +15,24 @@ from flask import Blueprint, request, jsonify, g, Response
 from routes.auth import require_auth
 from services import supabase_service, embedding_service
 from services import rag_service
+from services import literature_service
 
 chat_bp = Blueprint("chat", __name__)
 
 GEMINI_MODEL = "gemini-2.5-flash"
 TIMEOUT = 300
-# Claude models think before answering, and thinking shares the max_tokens
-# budget with the visible reply — 4096 is enough for a chat answer but a
-# research question can spend it all reasoning and return nothing. This is a
-# ceiling, not a charge: unused tokens cost nothing.
-ANTHROPIC_MIN_MAX_TOKENS = 8192
+# Claude: thinking is on for every model we offer, and stays on. It is sent
+# explicitly as adaptive (the model decides how far to think) with effort
+# "high": Opus 5.5 and Haiku 5.5 default to "medium", one level below the
+# rest, and research answers are where depth pays. Thinking shares max_tokens
+# with the answer, so the floor leaves room for both; it is a ceiling, not a
+# charge. (Anthropic's guidance for non-streaming calls is ~16,000.)
+ANTHROPIC_MIN_MAX_TOKENS = 16000
+ANTHROPIC_EFFORT = "high"
+# The current web-search tool, on the models that support it; the others take
+# the basic version.
+ANTHROPIC_SEARCH_TOOL = {"claude-opus-5-5": "web_search_20260209", "claude-sonnet-5-5": "web_search_20260209",
+                         "claude-opus-5": "web_search_20260209", "claude-sonnet-5": "web_search_20260209"}
 # Gemini 2.5+ thinks before answering and the reasoning is billed against
 # max_output_tokens, same as Claude. Measured: a 3-part biomedical question
 # spent 860 of 900 tokens thinking and returned a 36-token truncated answer.
@@ -38,66 +47,72 @@ GEMINI_MIN_MAX_TOKENS = 8192
 OPENAI_LIKE_MIN_MAX_TOKENS = 16384
 GEMINI_RETRY_WAIT = 15
 
-# Groq dropped the Llama 3.3 endpoint entirely; this is its current offering.
-GROQ_MODEL = "openai/gpt-oss-120b"
-
-# Cohere superseded command-r-plus with the command-a line.
-COHERE_MODEL = "command-a-plus-05-2026"
-
-# Models beyond the original seven. Keys are permanent identifiers: they are
-# stored in `validations.model` and in cached conversations, so a key must never
-# be renamed or repointed at a different model — add a new one instead.
-# Every id below was verified against the provider's live /models endpoint.
-EXTRA_MODELS = {
+# ── Models ─────────────────────────────────────────────────────────────────
+# One table for every model the site offers. Keys are permanent: they are
+# written into validations.model and usage_logs, so a key is never renamed or
+# pointed at a different model — a new model gets a new key.
+#
+# Every id was checked against the provider's live model list on 2026-10-22.
+# Retired keys (claude = Sonnet 4.6, gpt4 = GPT-4o, deepseek, qwen = Qwen 2.5,
+# gemini35, opus48, fable5, gpt56sol, qwen38max, deepseek_flash) are no longer
+# offered; the frontend keeps their names so old chats and statistics still
+# read correctly. Retired because: superseded by a newer model of the same
+# line; gemini-3.5-flash is served as 3.6; deepseek-chat is served as
+# deepseek-flash, which never answered within the timeout; qwen/qwen3.8-max is
+# no longer listed by OpenRouter.
+#
+# provider → which caller and which user key ("user_key", see below) applies.
+# Gemini Pro and Gemini 4 Argon need a paid Google plan (429 on a free key).
+MODELS = {
     # Anthropic
-    "opus55":    {"provider": "anthropic", "id": "claude-opus-5-5"},
-    "opus5":     {"provider": "anthropic", "id": "claude-opus-5"},
-    "opus48":    {"provider": "anthropic", "id": "claude-opus-4-8"},
-    "sonnet55":  {"provider": "anthropic", "id": "claude-sonnet-5-5"},
-    "sonnet5":   {"provider": "anthropic", "id": "claude-sonnet-5"},
-    "fable51":   {"provider": "anthropic", "id": "claude-fable-5-1"},
-    "fable5":    {"provider": "anthropic", "id": "claude-fable-5"},
-    # OpenAI — every id here takes max_completion_tokens, not max_tokens.
-    "gpt6astra": {"provider": "openai", "id": "gpt-6-astra",  "token_param": "max_completion_tokens"},
-    "gpt61sol":  {"provider": "openai", "id": "gpt-6.1-sol",  "token_param": "max_completion_tokens"},
-    "gpt56sol":  {"provider": "openai", "id": "gpt-5.6-sol",  "token_param": "max_completion_tokens"},
-    "gpt55":     {"provider": "openai", "id": "gpt-5.5",      "token_param": "max_completion_tokens"},
-    "gpt54mini": {"provider": "openai", "id": "gpt-5.4-mini", "token_param": "max_completion_tokens"},
-    # DeepSeek — the API now lists exactly two models. deepseek-chat (V3) and
-    # deepseek-v4-flash are both gone from it, so the old ids are retired.
-    "deepseek_pro":   {"provider": "deepseek", "id": "deepseek-v4-pro"},
-    # Listed by DeepSeek's API but unresponsive: no reply to a one-line prompt
-    # inside the full 300s timeout, repeatedly. Kept registered so historical
-    # validations rows resolve, but not offered in the UI.
-    "deepseek_flash": {"provider": "deepseek", "id": "deepseek-flash"},
-    # Google — Flash tiers only. Gemini Pro returns 429 RESOURCE_EXHAUSTED on a
-    # free-tier key, so listing it would ship a model that always errors.
-    "gemini38":  {"provider": "google", "id": "gemini-3.8-flash", "search": False},
-    "gemini36":  {"provider": "google", "id": "gemini-3.6-flash", "search": False},
-    "gemini35":  {"provider": "google", "id": "gemini-3.5-flash", "search": False},
-    # Qwen — served through OpenRouter, like the existing "qwen" entry.
-    "qwen38flash": {"provider": "openrouter", "id": "qwen/qwen3.8-flash"},
-    "qwen38max":   {"provider": "openrouter", "id": "qwen/qwen3.8-max"},
-    "qwen37plus":  {"provider": "openrouter", "id": "qwen/qwen3.7-plus"},
-    "qwen36flash": {"provider": "openrouter", "id": "qwen/qwen3.6-flash"},
+    "opus55":   {"provider": "anthropic", "id": "claude-opus-5-5"},
+    "sonnet55": {"provider": "anthropic", "id": "claude-sonnet-5-5"},
+    "haiku55":  {"provider": "anthropic", "id": "claude-haiku-5-5"},
+    "fable51":  {"provider": "anthropic", "id": "claude-fable-5-1"},
+    "opus5":    {"provider": "anthropic", "id": "claude-opus-5"},
+    "sonnet5":  {"provider": "anthropic", "id": "claude-sonnet-5"},
+    # OpenAI — all take max_completion_tokens rather than max_tokens
+    "gpt61sol":  {"provider": "openai", "id": "gpt-6.1-sol"},
+    "gpt6astra": {"provider": "openai", "id": "gpt-6-astra"},
+    "gpt6luna":  {"provider": "openai", "id": "gpt-6-luna"},
+    "gpt55":     {"provider": "openai", "id": "gpt-5.5"},
+    "gpt54mini": {"provider": "openai", "id": "gpt-5.4-mini"},
+    # DeepSeek
+    "deepseek_pro": {"provider": "deepseek", "id": "deepseek-v4-pro"},
+    # Google — web search only on 2.5 Flash
+    "gemini38": {"provider": "google", "id": "gemini-3.8-flash"},
+    "gemini37": {"provider": "google", "id": "gemini-3.7-flash"},
+    "gemini36": {"provider": "google", "id": "gemini-3.6-flash"},
+    "gemini":   {"provider": "google", "id": "gemini-2.5-flash", "search": True},
+    # Qwen via OpenRouter (paid credit) and via Groq (free tier)
+    "qwen38flash":   {"provider": "openrouter", "id": "qwen/qwen3.8-flash"},
+    "qwen38max0902": {"provider": "openrouter", "id": "qwen/qwen3.8-max-0902"},
+    "qwen37plus":    {"provider": "openrouter", "id": "qwen/qwen3.7-plus"},
+    "qwen36flash":   {"provider": "openrouter", "id": "qwen/qwen3.6-flash"},
+    "groq_qwen38":   {"provider": "groq", "id": "qwen/qwen3.8-27b"},
+    # Others. "groq" was Llama 3.3 before 2026-10-01 (Groq retired it); rows
+    # from before then should be analysed separately.
+    "groq":   {"provider": "groq", "id": "openai/gpt-oss-120b"},
+    "cohere": {"provider": "cohere", "id": "command-a-plus-05-2026"},
 }
 
-# Several models share one provider credential: every Anthropic model
-# authenticates with the user's "claude" key, every OpenAI model with "gpt4".
-# Without this, a user who supplied an Anthropic key would still be metered on
-# Opus 5 because the lookup would miss.
-PROVIDER_KEY_FOR_MODEL = {
-    k: {"anthropic": "claude", "openai": "gpt4", "deepseek": "deepseek",
-        "google": "gemini", "openrouter": "qwen"}[m["provider"]]
-    for k, m in EXTRA_MODELS.items()
-}
+# The user_keys entry (from the browser's API-key settings) that pays for each
+# provider's models, and the server's own key as the fallback.
+USER_KEY = {"anthropic": "claude", "openai": "gpt4", "deepseek": "deepseek",
+            "google": "gemini", "openrouter": "qwen", "groq": "groq", "cohere": "cohere"}
+SERVER_KEY = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY",
+              "deepseek": "DEEPSEEK_API_KEY", "google": "GEMINI_API_KEY",
+              "openrouter": "OPENROUTER_API_KEY", "groq": "GROQ_API_KEY",
+              "cohere": "COHERE_API_KEY"}
+OPENAI_COMPATIBLE_URL = {"deepseek": "https://api.deepseek.com",
+                         "openrouter": "https://openrouter.ai/api/v1",
+                         "groq": "https://api.groq.com/openai/v1",
+                         "openai": None}
 
-VALID_MODELS    = {"claude", "gpt4", "gemini", "deepseek", "groq", "qwen", "cohere"} | set(EXTRA_MODELS)
-# Anthropic and OpenAI models bill per token on the project's keys, so they are
-# metered. DeepSeek stays ungated to match the existing "deepseek" entry.
-GATED_MODELS    = {"claude", "gpt4"} | {
-    k for k, m in EXTRA_MODELS.items() if m["provider"] in ("anthropic", "openai")
-}
+PROVIDER_KEY_FOR_MODEL = {k: USER_KEY[m["provider"]] for k, m in MODELS.items()}
+VALID_MODELS = set(MODELS)
+# Anthropic and OpenAI bill per token on the project's keys, so they are metered.
+GATED_MODELS = {k for k, m in MODELS.items() if m["provider"] in ("anthropic", "openai")}
 FREE_LIMIT      = 5                     # messages/user/day on backend keys
 ADMIN_EMAILS    = [e.strip().lower() for e in
                    (os.getenv("ADMIN_EMAILS") or os.getenv("ADMIN_EMAIL", "chitrashenshah@gmail.com")).split(",")
@@ -125,28 +140,26 @@ MAX_DOC_CONTEXT_CHARS = 80_000  # cap total injected document text
 MAX_HISTORY_CHARS = 24_000        # ≈6k tokens of history per model per turn
 MAX_HISTORY_MSG_CHARS = 4_000     # one long answer cannot crowd out the rest
 
-# Hidden baseline applied to every biomedical-mode request, on top of whatever
-# prompt the user selected. Never shown in the UI.
+# Hidden baseline for biomedical mode only (normal mode sends no system prompt).
+# It is the single place citation rules live: the selectable prompts and the
+# literature block used to repeat them in their own words, and three overlapping
+# warnings about fabrication made models over-cautious — some declined to list
+# candidates at all.
+#
+# Why each rule is there:
+# - PMIDs after findings make an answer checkable; told to "always cite",
+#   models also cited definitions and pleasantries, burying the claims that
+#   needed support.
+# - Link format and the note on automatic checking stop the "I cannot browse
+#   the internet, so I cannot provide links" padding: a PubMed link needs no
+#   browsing, and the platform verifies every identifier after the answer.
 BIOMEDICAL_BASE_PROMPT = (
-    "The user is a biomedical researcher, scientist, and graduate student. "
-    "Tailor every response for a scientific audience: use precise terminology, "
-    "cite mechanisms where relevant, and provide the depth an expert would expect."
-    "\n\n"
-    # Citations are verified against PubMed after the fact, and a claim with no
-    # identifier cannot be checked. Asking for PMIDs is what makes the answer
-    # measurable. The negative half matters as much as the positive: told to
-    # "always cite", models attach references to definitions and pleasantries,
-    # which buries the claims that actually needed support.
-    "CITATIONS: When you state a specific experimental finding, a clinical "
-    "result, or a claim about what a particular molecule does, give the PMID "
-    "in the form `PMID: 12345678` immediately after it. One PMID per claim is "
-    "enough.\n"
-    "Do NOT attach citations to definitions, background explanation, reasoning "
-    "about mechanism, your own recommendations, or conversational replies — "
-    "those need no reference and adding one obscures the claims that do.\n"
-    "If you do not know a real PMID for a claim, say so plainly, or cite it as "
-    "author and year. Never invent, guess at, or approximate an identifier: a "
-    "fabricated PMID is far worse than an uncited claim."
+    "The user is a biomedical researcher. Answer at expert depth with precise terminology.\n\n"
+    "Citations: after a specific finding, or a claim about what a molecule does, cite it as "
+    "[PMID: 12345678](https://pubmed.ncbi.nlm.nih.gov/12345678/). Do not cite definitions, "
+    "reasoning or recommendations. If you do not know a real PMID, cite author and year or "
+    "leave the claim uncited; never invent an identifier. Citations are checked against "
+    "PubMed automatically, so do not add disclaimers about browsing or verification."
 )
 
 
@@ -203,7 +216,6 @@ def _gated_blocked_models(user: dict, user_keys: dict, gated_requested: list) ->
     if not user:
         return set(gated_requested)
 
-    from datetime import date
     user_id    = user.get("id", "")
     user_email = user.get("email", "")
     today      = date.today().isoformat()
@@ -223,25 +235,20 @@ def _gated_blocked_models(user: dict, user_keys: dict, gated_requested: list) ->
         # "openrouter" value lift the limit on the project's keys.
         if user_keys.get(PROVIDER_KEY_FOR_MODEL.get(m, m)):
             continue
-        if user_keys.get("openrouter") and m in OPENROUTER_MODEL_IDS:
-            continue
         if not _model_quota_ok(user_id, today, m):
             blocked.add(m)
     return blocked
 
 
-def _load_biomedical_prompt() -> str:
-    path = os.path.join("prompts", "biomedical_prompt.txt")
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return f.read().strip()
-    except FileNotFoundError:
-        return "You are an expert biomedical researcher. Provide accurate, evidence-based responses."
-
-
 def _gemini_is_retryable(err: str) -> bool:
     e = err.upper()
     return "503" in err or "UNAVAILABLE" in e or "429" in err or "QUOTA" in e or "RATE" in e or "RESOURCE_EXHAUSTED" in e
+
+
+def _error(model: str, code: str) -> dict:
+    """A model result that failed before producing usage. `code` is what the
+    frontend explains to the user (API_KEY_INVALID, RATE_LIMIT, …)."""
+    return {"model": model, "status": "error", "error": code, "usage": _usage()}
 
 
 def _usage(input_t=0, output_t=0, cache_read=0, cache_write=0) -> dict:
@@ -303,51 +310,254 @@ def _retrieve_chunks(session_id: str, query: str) -> str:
         return ""
 
 
+# The one framing for uploaded files, whether they come from the session's
+# stored documents or are attached inline (no session to store them on). The
+# two paths used to describe the same files in different words.
+_FILES_PREAMBLE = "Files the user uploaded, with their extracted text. Use them as reference:"
+
+
+def _file_block(name: str, text: str) -> str:
+    text = (text or "").strip() or "(No text could be extracted — the file may be image-based or empty.)"
+    return f"=== FILE: {name or 'document'} ===\n{text}\n=== END FILE ==="
+
+
 def _full_document_context(docs: list) -> str:
-    """Concatenate whole documents into one framed, capped block (small-doc path)."""
+    """Whole stored documents as one capped block (small-document path)."""
     blocks, total = [], 0
     for d in docs:
-        content = (d.get("content") or "").strip()
-        if not content:
+        if not (d.get("content") or "").strip():
             continue
-        block = f'=== FILE: {d.get("filename", "document")} ===\n{content}\n=== END FILE ==='
+        block = _file_block(d.get("filename"), d["content"])
         if total + len(block) > MAX_DOC_CONTEXT_CHARS:
             blocks.append("=== [additional document text truncated to conserve tokens] ===")
             break
         blocks.append(block)
         total += len(block)
-    if not blocks:
-        return ""
-    return (
-        "The following file(s) were uploaded for this research session. "
-        "Treat them as readable reference context for every answer:\n\n"
-        + "\n\n".join(blocks)
-    )
+    return f"{_FILES_PREAMBLE}\n\n" + "\n\n".join(blocks) if blocks else ""
 
 
 def _build_full_message(message: str, text_atts: list) -> str:
-    """Embed any freshly-attached text files inline in the user message."""
+    """Freshly attached files inline in the message, when there is no session."""
     if not text_atts:
         return message
-    file_blocks = []
-    for att in text_atts:
-        extracted = (att.get("text") or "").strip()
-        if extracted:
-            file_blocks.append(f'=== BEGIN FILE: {att["filename"]} ===\n{extracted}\n=== END FILE ===')
-        else:
-            file_blocks.append(
-                f'=== FILE: {att["filename"]} ===\n'
-                f'(No text could be extracted — the file may be image-based or empty.)\n'
-                f'=== END FILE ==='
-            )
-    joined = "\n\n".join(file_blocks)
-    preamble = (
-        "The user has provided the following file(s). The full text has been "
-        "extracted and is included below — treat it as readable text content.\n\n"
-    )
-    if message:
-        return f"{message}\n\n{preamble}{joined}"
-    return f"Please read and analyze the following file(s):\n\n{preamble}{joined}"
+    files = "\n\n".join(_file_block(a.get("filename"), a.get("text")) for a in text_atts)
+    return f"{message or 'Please read and analyze these files.'}\n\n{_FILES_PREAMBLE}\n\n{files}"
+
+
+# ── Literature grounding (the per-box "database" and "date range" options) ───
+# A box with a database selected gets the papers that database returns for the
+# question, with the instruction to cite from them. Boxes without one answer
+# from training alone, which is the comparison the option exists for.
+LITERATURE_DATABASES = ("pubmed", "europepmc")
+LITERATURE_RANGES = {"1y": 1, "5y": 5, "10y": 10, "all": None}
+# Papers per box: a number the user chose, or "auto". A paper with its
+# abstract costs ~200 input tokens on every question; a title line ~30.
+LITERATURE_PAPERS_MAX = 25            # what one PubMed / Europe PMC page returns
+# Auto: the model sees the 25 best matches and decides which to use. Only the
+# top ones carry abstracts, so it costs about what a fixed 8 did (~2,100 tokens)
+# while offering three times the candidates. A relevance filter on our side
+# was tried first, but PubMed already ANDs every term, so nearly every result
+# "matched" — including an immune-adverse-events review for a fibrosis question.
+LITERATURE_AUTO_ABSTRACTS = 8
+LITERATURE_ABSTRACT_CHARS = 700
+
+# Words about the request rather than the topic. PubMed ANDs every term, so
+# each one left in narrows the search to papers that use it: "Which miRNAs are
+# the most promising targets…" returned 4 papers as typed and 8 relevant ones
+# reduced to its terms. Worse, "give me the citations again with the link…
+# cite properly" searched for "citations", "link" and "cite", and the model was
+# handed papers ABOUT citations and links (a citation-network recommender,
+# "social prescribing link workers") instead of anything on miRNAs.
+_QUERY_FILLER = {
+    "citation", "citations", "cite", "cited", "citing", "reference", "references",
+    "source", "sources", "link", "links", "url", "urls", "pmid", "pmids", "doi",
+    "paper", "papers", "article", "articles", "literature", "pubmed", "publication",
+    "publications", "again", "find", "show", "provide", "properly", "proper",
+    "tentative", "related", "relevant", "regarding", "concerning", "involved",
+    "latest", "recent", "new", "help", "can", "you", "also", "more", "some", "any",
+    "all", "please", "need", "want", "know", "using", "use", "based", "make",
+    "which", "what", "most", "promising", "therapeutic", "targets", "target", "reduce",
+    "after", "protect", "against", "does", "the", "are", "how", "strong", "evidence",
+    "about", "with", "from", "that", "this", "into", "their", "there", "best", "good",
+    "role", "roles", "current", "known", "potential", "could", "would", "should",
+    "explain", "give", "list", "tell", "answer", "under", "words", "word", "briefly",
+    "brief", "summarize", "summarise", "sentences", "sentence", "bullet",
+    "bullets", "points", "detail", "detailed", "include", "format", "table", "short",
+}
+
+
+def _parse_literature(raw, models: list) -> dict:
+    """{model: (database, year_from, papers)} for the boxes that asked for literature."""
+    out = {}
+    for m, opt in (raw or {}).items():
+        if m not in models or not isinstance(opt, dict):
+            continue
+        db = opt.get("db")
+        if db not in LITERATURE_DATABASES:
+            continue
+        years = LITERATURE_RANGES.get(opt.get("dates") or "all")
+        try:
+            papers = max(1, min(int(opt.get("papers")), LITERATURE_PAPERS_MAX))
+        except (TypeError, ValueError):
+            papers = "auto"                 # no preference: the model decides
+        out[m] = (db, date.today().year - years if years else None, papers)
+    return out
+
+
+def _literature_terms(question: str, previous: str = "") -> list:
+    """The question's search terms, in order.
+
+    Only the question itself is used: instructions after it ("Answer in under
+    150 words") went into the PubMed query and made it return nothing.
+    A follow-up with almost no topic of its own ("give me the citations again")
+    is searched on the previous question's topic instead.
+    """
+    def terms(text):
+        text = text or ""
+        if "?" in text:
+            text = text[:text.index("?")]
+        words = re.findall(r"[A-Za-z][A-Za-z0-9\-]{2,}", text)
+        return list(dict.fromkeys(
+            w for w in words
+            if w.lower() not in _QUERY_FILLER and w.lower() not in literature_service._STOPWORDS))
+
+    found = terms(question)
+    if len(found) < 2 and previous:
+        found = list(dict.fromkeys(found + terms(previous)))
+    return found
+
+
+def _literature_block(db: str, year_from: int | None, papers: list,
+                      abstracts: int | None = None) -> str:
+    """The papers as the model sees them. `abstracts` limits how many carry
+    their abstract (auto mode); the rest are title lines."""
+    name = {"pubmed": "PubMed", "europepmc": "Europe PMC"}[db]
+    since = f" published since {year_from}" if year_from else ""
+    # The date range filtered only these papers; the model was never told it,
+    # so for anything it cited from memory it reached for the classic papers
+    # it knows best (2007, 2008, 2013) despite "Past 5 years". The range is
+    # strict, at the user's request: older work may be described, not cited.
+    dates = (f" Date range: cite only papers published in {year_from} or later. Do not cite "
+             "older papers, even landmark ones; if older work matters, describe it without a "
+             "citation.") if year_from else ""
+    if not papers:
+        return (f"[OmniMed searched {name}{since} for this question and found no papers. Mention "
+                f"that briefly, then answer from established knowledge without inventing citations.{dates}]")
+    rows = []
+    for i, p in enumerate(papers, 1):
+        ident = f"PMID: {p['pmid']}" if p.get("pmid") else (f"DOI: {p['doi']}" if p.get("doi") else "")
+        head = f"[{i}] {p.get('title', '').rstrip('.')}. {p.get('journal', '')} {p.get('year', '')}. {ident}"
+        abstract = (p.get("abstract") or "")[:LITERATURE_ABSTRACT_CHARS]
+        if abstract and (abstracts is None or i <= abstracts):
+            head += f"\nAbstract: {abstract}"
+        rows.append(head)
+    # Marked as background the user neither wrote nor saw: inside the user's
+    # turn it was otherwise taken for the user's own references, and "give me
+    # the citations again" got these papers listed back instead of an answer.
+    # "Answer fully" because a model told only to ground itself in off-topic
+    # results declined to answer at all.
+    return (f"[Background: {len(papers)} papers from {name}{since}, found by OmniMed's keyword "
+            "search. The user did not write or see this list.]\n"
+            "Use the relevant ones as evidence and cite them inline; ignore off-topic ones. "
+            "Answer fully, not only from these papers, and do not list them back. \"The "
+            f"citations\" in the user's message means those in earlier answers, not this list.{dates}\n\n"
+            + "\n\n".join(rows) + "\n[End of background]")
+
+
+MAX_MISSED_QUESTIONS = 3
+MAX_MISSED_CHARS = 300
+
+
+def _missed_note(questions) -> str:
+    """Earlier questions of this chat that this model never saw.
+
+    A model put into a box mid-conversation has no history of its own, so a
+    follow-up like "give me the citations again" made no sense to it ("I don't
+    have access to any previous conversation"). It is told the questions only,
+    never the other models' answers: those would make the answers depend on
+    each other, and comparing independent answers is the point.
+    """
+    qs = [str(q).strip()[:MAX_MISSED_CHARS] for q in (questions or []) if str(q).strip()]
+    qs = qs[-MAX_MISSED_QUESTIONS:]
+    if not qs:
+        return ""
+    lines = "\n".join(f"- {q}" for q in qs)
+    return ("[CONTEXT: you joined this conversation part-way. Earlier, the user asked "
+            "these questions, which other models answered and you did not see:\n"
+            f"{lines}\nIf the message below refers back to them, answer it on that topic.]")
+
+
+async def _grounded_message(model: str, full_message: str, literature: dict, search_for,
+                            missed: dict | None = None) -> tuple:
+    """The message for one model: its literature block if it asked for one,
+    and the earlier questions it missed, before the user's own message.
+
+    Both go into this turn's message, after the history, so a box's cached
+    conversation prefix is unaffected by them.
+    """
+    note = _missed_note((missed or {}).get(model))
+
+    def wrapped(*parts) -> str:
+        parts = [p for p in parts if p]
+        return "\n\n".join(parts + [f"The user's message:\n{full_message}"]) if parts else full_message
+
+    if model not in literature:
+        return wrapped(note), None
+    db, year_from, wanted = literature[model]
+    grounding = {"db": db, "since": year_from, "requested": wanted}
+    auto = wanted == "auto"
+    try:
+        found = await search_for(db, year_from)
+        papers = (found.get("papers") or [])[:LITERATURE_PAPERS_MAX if auto else wanted]
+    except Exception:
+        return wrapped(note), {**grounding, "error": "SEARCH_FAILED"}
+    block = _literature_block(db, year_from, papers,
+                              abstracts=LITERATURE_AUTO_ABSTRACTS if auto else None)
+    return wrapped(block, note), {**grounding, "papers": len(papers)}
+
+
+def _previous_question(histories: dict, history: list) -> str:
+    """The last question asked before this one, from any box's history."""
+    for h in list(histories.values()) + [history]:
+        for turn in reversed(h or []):
+            if turn.get("role") == "user" and turn.get("content"):
+                return str(turn["content"])
+    return ""
+
+
+def _literature_searcher(question: str, literature: dict, previous: str = ""):
+    """One search per (database, year), shared by every box that chose it.
+
+    It fetches the most papers any of those boxes asked for; each box then
+    takes its own number from the top of the same relevance-ranked list.
+    """
+    terms = _literature_terms(question, previous) or [(question or "")[:300]]
+    limits: dict = {}
+    for db, year_from, wanted in literature.values():
+        n = LITERATURE_PAPERS_MAX if wanted == "auto" else wanted
+        limits[(db, year_from)] = max(n, limits.get((db, year_from), 0))
+    tasks = {}
+
+    async def search(db, year_from):
+        # PubMed ANDs every term, so one over-specific word can empty the
+        # result. Rather than hand the model "no papers found", drop terms
+        # from the end (the least central) and try again, down to three.
+        attempt = terms
+        while True:
+            found = await literature_service.search(
+                " ".join(attempt)[:300], sources=(db,),
+                limit=limits.get((db, year_from), LITERATURE_PAPERS_MAX),
+                year_from=year_from)
+            if found.get("papers") or len(attempt) <= 3:
+                return found
+            attempt = attempt[:max(3, len(attempt) - 2)]
+
+    def search_for(db, year_from):
+        key = (db, year_from)
+        if key not in tasks:
+            tasks[key] = asyncio.ensure_future(search(db, year_from))
+        return tasks[key]
+    return search_for
 
 
 def _compose_system(system_prompt: str | None, doc_context: str) -> str | None:
@@ -429,7 +639,7 @@ async def _call_claude(message, system_prompt, doc_context, history, image_atts,
                        use_search=False):
     api_key = user_api_key or os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
-        return {"model": model_key, "status": "error", "error": "API_KEY_INVALID", "usage": _usage()}
+        return _error(model_key, "API_KEY_INVALID")
     try:
         client = anthropic.AsyncAnthropic(api_key=api_key)
         messages = [{"role": h["role"], "content": h["content"]} for h in _cap_history(history)]
@@ -456,9 +666,12 @@ async def _call_claude(message, system_prompt, doc_context, history, image_atts,
             model=model_id,
             max_tokens=max(max_tokens, ANTHROPIC_MIN_MAX_TOKENS),
             messages=messages,
+            thinking={"type": "adaptive"},
+            output_config={"effort": ANTHROPIC_EFFORT},
         )
         if use_search:
-            kwargs["tools"] = [{"type": "web_search_20250305", "name": "web_search"}]
+            kwargs["tools"] = [{"type": ANTHROPIC_SEARCH_TOOL.get(model_id, "web_search_20250305"),
+                                "name": "web_search"}]
         if system_blocks:
             kwargs["system"] = system_blocks
 
@@ -497,23 +710,26 @@ async def _call_claude(message, system_prompt, doc_context, history, image_atts,
     except asyncio.TimeoutError:
         return {"model": model_key, "status": "TIMED_OUT", "error": "TIMEOUT", "usage": _usage()}
     except anthropic.AuthenticationError:
-        return {"model": model_key, "status": "error", "error": "API_KEY_INVALID", "usage": _usage()}
+        return _error(model_key, "API_KEY_INVALID")
     except anthropic.RateLimitError:
-        return {"model": model_key, "status": "error", "error": "RATE_LIMIT", "usage": _usage()}
+        return _error(model_key, "RATE_LIMIT")
     except anthropic.BadRequestError as e:
         msg = str(e)
         if "usage limit" in msg.lower():
             # Surface the reset date the API gives us — this is a configured
             # spend cap, not an empty balance, so the user needs to know when it
             # lifts (or that they can raise it now).
-            import re as _re
-            when = _re.search(r"regain access on ([0-9]{4}-[0-9]{2}-[0-9]{2}[^\"']*)", msg)
+            when = re.search(r"regain access on ([0-9]{4}-[0-9]{2}-[0-9]{2}[^\"']*)", msg)
             return {"model": model_key, "status": "error", "error": "USAGE_LIMIT",
                     "limit_resets": when.group(1).strip() if when else None,
                     "usage": _usage()}
-        return {"model": model_key, "status": "error", "error": msg[:200], "usage": _usage()}
+        if "credit balance" in msg.lower():
+            # An empty prepaid balance, unlike the spend cap above. Shown raw it
+            # was a 200-character provider message in the answer box.
+            return _error(model_key, "INSUFFICIENT_CREDITS")
+        return _error(model_key, msg[:200])
     except Exception as e:
-        return {"model": model_key, "status": "error", "error": str(e)[:200], "usage": _usage()}
+        return _error(model_key, str(e)[:200])
 
 
 def _openai_usage(response) -> dict:
@@ -528,28 +744,11 @@ def _openai_usage(response) -> dict:
         return _usage()
 
 
-# Hidden reasoning, not conversation history, is what makes this expensive.
-# Measured on one literature question: DeepSeek V4 Pro billed 6,432 output
-# tokens to show 1,054 characters — roughly 6,000 tokens of thinking nobody
-# ever sees, charged at output rates (3-5x input). Input was 122 tokens.
-#
-# Disabling it was not a trade of quality for cost. The same question answered
-# with thinking off used 722 output tokens and returned 3,134 characters — an
-# eighth of the spend and three times the answer, because the reasoning had
-# been consuming the budget the answer needed.
-#
-# Kept configurable per model: a provider that benefits from thinking can opt
-# back in here without touching the call sites.
-# Left empty deliberately. Disabling reasoning cut DeepSeek's output tokens by
-# 89%, but what that measured was cost and answer length — not whether the
-# science was still right. Reasoning is exactly what a synthesis question needs,
-# and this project asks synthesis questions. Until the two are compared properly
-# (same questions, thinking on vs off, scored blind), thinking stays on and the
-# saving is pursued through caching instead.
-#
-# Populate a provider here to disable its reasoning, e.g.
-#   "deepseek": {"thinking": {"type": "disabled"}}
-REASONING_OFF: dict = {}
+# Thinking stays on for every model. It is the expensive part — measured on
+# one literature question, DeepSeek V4 Pro billed ~6,000 output tokens of
+# reasoning to show 1,054 characters — but reasoning is what synthesis
+# questions need, and this project asks synthesis questions. Cost is saved
+# through caching instead, never by switching thinking off.
 
 # Reasoning models on these providers think before answering, and the thinking
 # shares the output budget. Uncapped, Qwen 3.8 Flash thought past the 300s
@@ -564,7 +763,7 @@ async def _call_openai_like(model_key, model_name, base_url, api_key,
                             message, system_prompt, doc_context, history, image_atts, max_tokens,
                             token_param="max_tokens", provider=None):
     if not api_key:
-        return {"model": model_key, "status": "error", "error": "API_KEY_INVALID", "usage": _usage()}
+        return _error(model_key, "API_KEY_INVALID")
     try:
         client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url) if base_url \
             else openai.AsyncOpenAI(api_key=api_key)
@@ -585,12 +784,9 @@ async def _call_openai_like(model_key, model_name, base_url, api_key,
         # question can be entirely consumed by reasoning, returning an empty
         # answer that looked like "the model said nothing". The cap is not a
         # reservation — raising it costs nothing unless the tokens are used.
-        reasoning = REASONING_OFF.get(provider or "")
-        extra_body = reasoning or REASONING_CAP.get(provider or "")
-        extra = {"extra_body": extra_body} if extra_body else {}
-        # With thinking off the floor is no longer needed — it existed only to
-        # leave room for reasoning that no longer happens.
-        budget = max_tokens if reasoning else max(max_tokens, OPENAI_LIKE_MIN_MAX_TOKENS)
+        cap = REASONING_CAP.get(provider or "")
+        extra = {"extra_body": cap} if cap else {}
+        budget = max(max_tokens, OPENAI_LIKE_MIN_MAX_TOKENS)
 
         async def _create(param):
             return await asyncio.wait_for(
@@ -627,8 +823,8 @@ async def _call_openai_like(model_key, model_name, base_url, api_key,
             if isinstance(err_obj, dict):
                 msg = str(err_obj.get("message", "")).lower()
             if "rate" in msg or "429" in msg or "limit" in msg:
-                return {"model": model_key, "status": "error", "error": "RATE_LIMIT", "usage": _usage()}
-            return {"model": model_key, "status": "error", "error": "MODEL_UNAVAILABLE", "usage": _usage()}
+                return _error(model_key, "RATE_LIMIT")
+            return _error(model_key, "MODEL_UNAVAILABLE")
         # An exhausted budget on a reasoning model returns HTTP 200 with empty
         # content. Reported as "ok" that renders as a blank box with nothing to
         # explain it — the Claude and Gemini paths already distinguish these,
@@ -647,9 +843,9 @@ async def _call_openai_like(model_key, model_name, base_url, api_key,
     except asyncio.TimeoutError:
         return {"model": model_key, "status": "TIMED_OUT", "error": "TIMEOUT", "usage": _usage()}
     except openai.AuthenticationError:
-        return {"model": model_key, "status": "error", "error": "API_KEY_INVALID", "usage": _usage()}
+        return _error(model_key, "API_KEY_INVALID")
     except openai.RateLimitError:
-        return {"model": model_key, "status": "error", "error": "RATE_LIMIT", "usage": _usage()}
+        return _error(model_key, "RATE_LIMIT")
     except Exception as e:
         err = str(e)
         if "402" in err or "requires more credits" in err:
@@ -658,25 +854,19 @@ async def _call_openai_like(model_key, model_name, base_url, api_key,
         low = err.lower()
         # OpenRouter/provider errors arrive as a big JSON string — map to clean codes
         if "429" in err or "rate-limit" in low or "rate limit" in low:
-            return {"model": model_key, "status": "error", "error": "RATE_LIMIT", "usage": _usage()}
+            return _error(model_key, "RATE_LIMIT")
         if "unauthorized" in low or "401" in err or "no auth" in low:
-            return {"model": model_key, "status": "error", "error": "API_KEY_INVALID", "usage": _usage()}
+            return _error(model_key, "API_KEY_INVALID")
         if "does not support" in low or "no endpoints" in low or "not support" in low:
-            return {"model": model_key, "status": "error", "error": "MODEL_UNAVAILABLE", "usage": _usage()}
-        return {"model": model_key, "status": "error", "error": err[:200], "usage": _usage()}
-
-
-async def _call_gpt(message, system_prompt, doc_context, history, image_atts, max_tokens=4096, user_api_key=None):
-    api_key = user_api_key or os.getenv("OPENAI_API_KEY")
-    return await _call_openai_like("gpt4", "gpt-4o-search-preview", None, api_key,
-                                   message, system_prompt, doc_context, history, image_atts, max_tokens)
+            return _error(model_key, "MODEL_UNAVAILABLE")
+        return _error(model_key, err[:200])
 
 
 async def _call_gemini(message, system_prompt, doc_context, history, image_atts, max_tokens=4096,
                        user_api_key=None, model_id=None, model_key="gemini", use_search=False):
     api_key = user_api_key or os.getenv("GEMINI_API_KEY")
     if not api_key:
-        return {"model": model_key, "status": "error", "error": "API_KEY_INVALID", "usage": _usage()}
+        return _error(model_key, "API_KEY_INVALID")
     try:
         client = genai.Client(api_key=api_key)
         contents = []
@@ -756,16 +946,17 @@ async def _call_gemini(message, system_prompt, doc_context, history, image_atts,
             return {"model": model_key, "status": "error", "error": "SERVICE_UNAVAILABLE",
                     "message": "Gemini is experiencing high demand. Try again in a moment.", "usage": _usage()}
         if "429" in err or "QUOTA" in err.upper() or "RATE" in err.upper():
-            return {"model": model_key, "status": "error", "error": "RATE_LIMIT", "usage": _usage()}
+            return _error(model_key, "RATE_LIMIT")
         if "API_KEY" in err.upper() or "INVALID" in err.upper():
-            return {"model": model_key, "status": "error", "error": "API_KEY_INVALID", "usage": _usage()}
-        return {"model": model_key, "status": "error", "error": err, "usage": _usage()}
+            return _error(model_key, "API_KEY_INVALID")
+        return _error(model_key, err)
 
 
-async def _call_cohere(message, system_prompt, doc_context, history, image_atts, max_tokens=4096, user_api_key=None):
+async def _call_cohere(message, system_prompt, doc_context, history, image_atts, max_tokens=4096,
+                       user_api_key=None, model_id="command-a-plus-05-2026", model_key="cohere"):
     api_key = user_api_key or os.getenv("COHERE_API_KEY")
     if not api_key:
-        return {"model": "cohere", "status": "error", "error": "API_KEY_INVALID", "usage": _usage()}
+        return _error(model_key, "API_KEY_INVALID")
     try:
         client = cohere.AsyncClientV2(api_key=api_key)
         messages = []
@@ -777,7 +968,7 @@ async def _call_cohere(message, system_prompt, doc_context, history, image_atts,
         messages.append({"role": "user", "content": message})
 
         response = await asyncio.wait_for(
-            client.chat(model=COHERE_MODEL, messages=messages,
+            client.chat(model=model_id, messages=messages,
                         max_tokens=max(max_tokens, OPENAI_LIKE_MIN_MAX_TOKENS),
                         thinking={"type": "enabled", "token_budget": REASONING_BUDGET}),
             timeout=TIMEOUT,
@@ -796,111 +987,52 @@ async def _call_cohere(message, system_prompt, doc_context, history, image_atts,
                  if getattr(c, "text", None)]
         text = "\n".join(parts).strip()
         if not text:
-            return {"model": "cohere", "status": "error",
+            return {"model": model_key, "status": "error",
                     "error": "EMPTY_RESPONSE", "usage": usage}
-        return {"model": "cohere", "status": "ok", "text": text, "usage": usage}
+        return {"model": model_key, "status": "ok", "text": text, "usage": usage}
     except asyncio.TimeoutError:
-        return {"model": "cohere", "status": "TIMED_OUT", "error": "TIMEOUT", "usage": _usage()}
+        return {"model": model_key, "status": "TIMED_OUT", "error": "TIMEOUT", "usage": _usage()}
     except Exception as e:
         err = str(e)
         if "401" in err or "unauthorized" in err.lower():
-            return {"model": "cohere", "status": "error", "error": "API_KEY_INVALID", "usage": _usage()}
+            return _error(model_key, "API_KEY_INVALID")
         if "429" in err or "rate" in err.lower():
-            return {"model": "cohere", "status": "error", "error": "RATE_LIMIT", "usage": _usage()}
-        return {"model": "cohere", "status": "error", "error": err, "usage": _usage()}
+            return _error(model_key, "RATE_LIMIT")
+        return _error(model_key, err)
 
 
-
-
-OPENROUTER_URL = "https://openrouter.ai/api/v1"
-OPENROUTER_MODEL_IDS = {
-    "claude":   "anthropic/claude-sonnet-4",
-    "gpt4":     "openai/gpt-4o",
-    "qwen":     "qwen/qwen-2.5-72b-instruct",
-    "deepseek": "deepseek/deepseek-chat",
-}
 
 
 async def _run_model(model, message, system_prompt, doc_context, history, image_atts, max_tokens, user_keys=None, web_search=False):
-    """Run a single model. user_keys is a dict of provider->api_key from the frontend."""
+    """Run one model from MODELS, on the user's own key for its provider if
+    they gave one, otherwise on the server's."""
+    spec = MODELS.get(model)
+    if not spec:
+        return _error(model, "UNKNOWN_MODEL")
+    provider, model_id = spec["provider"], spec["id"]
     user_keys = user_keys or {}
-    openrouter_key = user_keys.get("openrouter")
+    key = (user_keys.get(USER_KEY[provider])
+           # keys saved under the old "OpenRouter" setting still pay for Qwen
+           or (user_keys.get("openrouter") if provider == "openrouter" else None)
+           or os.getenv(SERVER_KEY[provider]))
 
-    if model == "claude":
-        if user_keys.get("claude"):
-            return await _call_claude(message, system_prompt, doc_context, history, image_atts, max_tokens, user_api_key=user_keys["claude"], use_search=web_search)
-        if openrouter_key:
-            return await _call_openai_like("claude", OPENROUTER_MODEL_IDS["claude"], OPENROUTER_URL,
-                                           openrouter_key, message, system_prompt, doc_context, history, [], max_tokens)
-        return await _call_claude(message, system_prompt, doc_context, history, image_atts, max_tokens, use_search=web_search)
-
-    if model == "gpt4":
-        if user_keys.get("gpt4"):
-            return await _call_gpt(message, system_prompt, doc_context, history, image_atts, max_tokens, user_api_key=user_keys["gpt4"])
-        if openrouter_key:
-            return await _call_openai_like("gpt4", OPENROUTER_MODEL_IDS["gpt4"], OPENROUTER_URL,
-                                           openrouter_key, message, system_prompt, doc_context, history, [], max_tokens)
-        return await _call_gpt(message, system_prompt, doc_context, history, image_atts, max_tokens)
-
-    if model == "gemini":
-        return await _call_gemini(message, system_prompt, doc_context, history, image_atts, max_tokens,
-                                  user_api_key=user_keys.get("gemini"), use_search=web_search)
-
-    if model == "qwen":
-        # Qwen only runs via OpenRouter. Prefer the user's own OpenRouter key for higher limits.
-        key = user_keys.get("qwen") or openrouter_key or os.getenv("OPENROUTER_API_KEY")
-        return await _call_openai_like("qwen", OPENROUTER_MODEL_IDS["qwen"], OPENROUTER_URL,
-                                       key, message, system_prompt, doc_context, history, [], max_tokens,
-                                       provider="openrouter")
-
-    if model == "deepseek":
-        key = user_keys.get("deepseek") or os.getenv("DEEPSEEK_API_KEY")
-        return await _call_openai_like("deepseek", "deepseek-chat", "https://api.deepseek.com",
-                                       key, message, system_prompt, doc_context, history, [], max_tokens,
-                                       provider="deepseek")
-
-    if model == "groq":
-        key = user_keys.get("groq") or os.getenv("GROQ_API_KEY")
-        # Groq retired llama-3.3-70b-versatile; the id now 404s. The key stays
-        # "groq" because it is written into validations.model, but note that it
-        # no longer denotes the same model — rows recorded before 2026-10-01
-        # are Llama 3.3 and should be analysed separately from later ones.
-        return await _call_openai_like("groq", GROQ_MODEL, "https://api.groq.com/openai/v1",
-                                       key, message, system_prompt, doc_context, history, [], max_tokens)
-
-    if model == "cohere":
-        key = user_keys.get("cohere") or os.getenv("COHERE_API_KEY")
-        return await _call_cohere(message, system_prompt, doc_context, history, image_atts, max_tokens, user_api_key=key)
-
-    spec = EXTRA_MODELS.get(model)
-    if spec:
-        provider = spec["provider"]
-        if provider == "anthropic":
-            return await _call_claude(message, system_prompt, doc_context, history, image_atts,
-                                      max_tokens, user_api_key=user_keys.get("claude"),
-                                      model_id=spec["id"], model_key=model, use_search=web_search)
-        if provider == "openai":
-            key = user_keys.get("gpt4") or os.getenv("OPENAI_API_KEY")
-            return await _call_openai_like(model, spec["id"], None, key,
-                                           message, system_prompt, doc_context, history, image_atts, max_tokens,
-                                           token_param=spec.get("token_param", "max_tokens"))
-        if provider == "deepseek":
-            key = user_keys.get("deepseek") or os.getenv("DEEPSEEK_API_KEY")
-            return await _call_openai_like(model, spec["id"], "https://api.deepseek.com", key,
-                                           message, system_prompt, doc_context, history, [], max_tokens,
-                                           provider="deepseek")
-        if provider == "google":
-            return await _call_gemini(message, system_prompt, doc_context, history, image_atts, max_tokens,
-                                      user_api_key=user_keys.get("gemini"),
-                                      model_id=spec["id"], model_key=model,
-                                      use_search=web_search and spec.get("search", True))
-        if provider == "openrouter":
-            key = user_keys.get("qwen") or openrouter_key or os.getenv("OPENROUTER_API_KEY")
-            return await _call_openai_like(model, spec["id"], OPENROUTER_URL, key,
-                                           message, system_prompt, doc_context, history, [], max_tokens,
-                                           provider="openrouter")
-
-    return {"model": model, "status": "error", "error": "UNKNOWN_MODEL", "usage": _usage()}
+    if provider == "anthropic":
+        return await _call_claude(message, system_prompt, doc_context, history, image_atts,
+                                  max_tokens, user_api_key=key, model_id=model_id,
+                                  model_key=model, use_search=web_search)
+    if provider == "google":
+        return await _call_gemini(message, system_prompt, doc_context, history, image_atts,
+                                  max_tokens, user_api_key=key, model_id=model_id, model_key=model,
+                                  use_search=web_search and spec.get("search", False))
+    if provider == "cohere":
+        return await _call_cohere(message, system_prompt, doc_context, history, image_atts,
+                                  max_tokens, user_api_key=key, model_id=model_id, model_key=model)
+    # OpenAI and the OpenAI-compatible APIs. Only OpenAI itself takes images.
+    return await _call_openai_like(model, model_id, OPENAI_COMPATIBLE_URL[provider], key,
+                                   message, system_prompt, doc_context, history,
+                                   image_atts if provider == "openai" else [], max_tokens,
+                                   token_param="max_completion_tokens" if provider == "openai" else "max_tokens",
+                                   provider=provider)
 
 
 def _persist_and_load_docs(session_id, user, text_atts) -> list:
@@ -986,14 +1118,15 @@ def _sse(event: str, data: dict) -> str:
 
 def _stream_models(models, message, full_message, system_prompt, doc_context,
                    histories, history, image_atts, max_tokens, session_id, user, mode,
-                   user_keys=None, gated_models=None, web_search=False):
+                   user_keys=None, gated_models=None, web_search=False, literature=None,
+                   missed=None):
     """
     Generator of SSE frames. A background thread runs all model calls
     concurrently in its own event loop and pushes each result onto a
     thread-safe queue the moment it completes; this generator yields a frame
     per result so the client renders each panel as soon as it's ready.
 
-    gated_models: subset of `models` (Claude/GPT-4o) that need a per-model daily
+    gated_models: subset of `models` (Claude and GPT) that need a per-model daily
     quota check. That check is a DB call, so it runs in a thread-pool executor —
     concurrently with the free models, which start immediately and never wait on it.
     A gated model over its limit emits DAILY_LIMIT_REACHED without calling any provider.
@@ -1002,9 +1135,13 @@ def _stream_models(models, message, full_message, system_prompt, doc_context,
     q: "queue.Queue" = queue.Queue()
     results: dict = {}
 
+    literature = literature or {}
+
     def worker():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+        search_for = _literature_searcher(
+            message, literature, _previous_question(histories, history))
 
         async def run_one(m):
             # Gated models: run the quota check off the event loop so it doesn't
@@ -1014,16 +1151,19 @@ def _stream_models(models, message, full_message, system_prompt, doc_context,
                     None, _gated_blocked_models, user, user_keys, [m]
                 )
                 if blocked:
-                    res = {"model": m, "status": "error", "error": "DAILY_LIMIT_REACHED", "usage": _usage()}
+                    res = _error(m, "DAILY_LIMIT_REACHED")
                     results[m] = res
                     q.put(("model", m, res))
                     return
+            msg, grounding = await _grounded_message(m, full_message, literature, search_for, missed)
             try:
-                res = await _run_model(m, full_message, system_prompt, doc_context,
+                res = await _run_model(m, msg, system_prompt, doc_context,
                                        histories.get(m, history), image_atts, max_tokens, user_keys,
                                        web_search=web_search)
             except Exception as e:
-                res = {"model": m, "status": "error", "error": str(e), "usage": _usage()}
+                res = _error(m, str(e))
+            if grounding:
+                res["grounding"] = grounding
             results[m] = res
             q.put(("model", m, res))
 
@@ -1074,6 +1214,8 @@ def ask():
     attachments = data.get("attachments", [])
 
     user_keys  = data.get("user_keys") or {}   # {model: api_key} from frontend localStorage
+    literature_opts = data.get("literature") or {}   # {model: {"db": …, "dates": …}}
+    missed      = data.get("missed_questions") or {}  # {model: [earlier questions it never saw]}
 
     models = list(dict.fromkeys(m for m in models if m in VALID_MODELS))
     if not models:
@@ -1081,10 +1223,11 @@ def ask():
     if len(models) > MAX_MODELS_PER_REQUEST:
         return jsonify({"error": "TOO_MANY_MODELS",
                         "message": f"At most {MAX_MODELS_PER_REQUEST} models per question"}), 400
+    literature = _parse_literature(literature_opts, models)
     if not message and not attachments:
         return jsonify({"error": "MISSING_MESSAGE"}), 400
 
-    # Claude and GPT-4o each have their OWN 5/day limit. The per-model quota
+    # Each Claude and GPT model has its OWN 5/day limit. The per-model quota
     # check is a DB call, so we defer it into the streaming worker where it runs
     # concurrently with the free models (which never block on it).
     gated_requested = [m for m in models if m in GATED_MODELS]
@@ -1113,7 +1256,8 @@ def ask():
         return Response(
             _stream_models(models, message, full_message, system_prompt, doc_context,
                            histories, history, image_atts, max_tokens, session_id, user, mode,
-                           user_keys, gated_requested, web_search=web_search),
+                           user_keys, gated_requested, web_search=web_search,
+                           literature=literature, missed=missed),
             mimetype="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -1123,20 +1267,26 @@ def ask():
     run_models = [m for m in models if m not in blocked_models]
 
     async def run():
-        tasks = [_run_model(m, full_message, system_prompt, doc_context,
-                            histories.get(m, history), image_atts, max_tokens, user_keys,
-                            web_search=web_search)
-                 for m in run_models]
-        done = await asyncio.gather(*tasks, return_exceptions=True)
+        search_for = _literature_searcher(
+            message, literature, _previous_question(histories, history))
+
+        async def one(m):
+            msg, grounding = await _grounded_message(m, full_message, literature, search_for, missed)
+            res = await _run_model(m, msg, system_prompt, doc_context,
+                                   histories.get(m, history), image_atts, max_tokens, user_keys,
+                                   web_search=web_search)
+            return {**res, "grounding": grounding} if grounding else res
+
+        done = await asyncio.gather(*[one(m) for m in run_models], return_exceptions=True)
         out = {}
         for m, res in zip(run_models, done):
             if isinstance(res, Exception):
-                out[m] = {"model": m, "status": "error", "error": str(res), "usage": _usage()}
+                out[m] = _error(m, str(res))
             else:
                 out[m] = res
         # Emit a limit error for each blocked gated model
         for m in blocked_models:
-            out[m] = {"model": m, "status": "error", "error": "DAILY_LIMIT_REACHED", "usage": _usage()}
+            out[m] = _error(m, "DAILY_LIMIT_REACHED")
         return out
 
     results = asyncio.run(run())

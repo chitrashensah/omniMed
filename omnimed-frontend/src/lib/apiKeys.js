@@ -1,38 +1,23 @@
+import { modelInfo } from '../data/models.js'
+
 const STORAGE_KEY = 'omnimed_user_api_keys'
 
-// Several models share one provider key: every Anthropic model authenticates
-// with the `claude` key, every OpenAI model with `gpt4`. Without this mapping a
-// stored Anthropic key wouldn't count for Opus 5 and the UI would keep showing
-// the 5/day badge. Keys not listed here use their own name as the provider.
-const PROVIDER_FOR_MODEL = {
-  opus5: 'claude', opus48: 'claude', sonnet5: 'claude', fable5: 'claude',
-  gpt55: 'gpt4', gpt54mini: 'gpt4',
-  deepseek_pro: 'deepseek', deepseek_flash: 'deepseek',
+// Which saved key pays for a model: every Anthropic model uses the `claude`
+// key, every OpenAI model `gpt4`, and so on (data/models.js, `userKey`).
+// A hand-kept list here once covered 9 of the 25 models, so a saved Anthropic
+// key did not count for Opus 5.5 and the 5/day badge stayed on.
+function providerForModel(modelKey) {
+  return modelInfo(modelKey).userKey || modelKey
 }
 
-export function providerForModel(modelKey) {
-  return PROVIDER_FOR_MODEL[modelKey] || modelKey
-}
-
+// One entry per key a user can save, in the order the settings show them.
+// There is no general "OpenRouter" key any more: the backend sends only the
+// Qwen models through OpenRouter, so an OpenRouter key is the Qwen key. A key
+// saved under the old "openrouter" name is moved there (see getAllKeys).
 export const KEY_CONFIGS = {
-  openrouter: {
-    label: 'OpenRouter',
-    description: 'One key for Claude, GPT-4o, and all other models',
-    models: ['claude', 'gpt4', 'deepseek', 'groq', 'qwen', 'cohere'],
-    note: 'Covers every Anthropic and OpenAI model in the list.',
-    url: 'https://openrouter.ai/keys',
-    steps: [
-      'Go to openrouter.ai and sign up',
-      'Click your avatar → Keys',
-      'Click Create Key, give it a name',
-      'Copy the key starting with sk-or-v1-…',
-    ],
-    placeholder: 'sk-or-v1-…',
-  },
   claude: {
     label: 'Anthropic (Claude)',
-    description: 'Direct Anthropic API key — covers every Claude model',
-    models: ['claude', 'opus5', 'opus48', 'sonnet5', 'fable5'],
+    description: 'Your Anthropic API key — covers every Claude model, with no daily limit',
     url: 'https://console.anthropic.com/settings/keys',
     steps: [
       'Go to console.anthropic.com and sign up',
@@ -43,9 +28,8 @@ export const KEY_CONFIGS = {
     placeholder: 'sk-ant-…',
   },
   gpt4: {
-    label: 'OpenAI (GPT-4o)',
-    description: 'Direct OpenAI API key — covers every GPT model',
-    models: ['gpt4', 'gpt55', 'gpt54mini'],
+    label: 'OpenAI (GPT)',
+    description: 'Your OpenAI API key — covers every GPT model, with no daily limit',
     url: 'https://platform.openai.com/api-keys',
     steps: [
       'Go to platform.openai.com and sign up',
@@ -55,10 +39,20 @@ export const KEY_CONFIGS = {
     ],
     placeholder: 'sk-…',
   },
+  gemini: {
+    label: 'Google (Gemini)',
+    description: 'Your own Gemini key for higher limits',
+    url: 'https://aistudio.google.com/apikey',
+    steps: [
+      'Go to aistudio.google.com/apikey and sign in',
+      'Click Create API Key',
+      'Copy the key starting with AIza…',
+    ],
+    placeholder: 'AIza…',
+  },
   deepseek: {
     label: 'DeepSeek',
     description: 'Your own DeepSeek key for higher limits',
-    models: ['deepseek', 'deepseek_pro', 'deepseek_flash'],
     url: 'https://platform.deepseek.com/api_keys',
     steps: [
       'Go to platform.deepseek.com and sign up',
@@ -68,10 +62,21 @@ export const KEY_CONFIGS = {
     ],
     placeholder: 'sk-…',
   },
+  qwen: {
+    label: 'Qwen (OpenRouter)',
+    description: 'An OpenRouter key, for the Qwen models served through OpenRouter',
+    url: 'https://openrouter.ai/keys',
+    steps: [
+      'Go to openrouter.ai and sign up',
+      'Click your avatar → Keys',
+      'Click Create Key',
+      'Copy the key starting with sk-or-v1-…',
+    ],
+    placeholder: 'sk-or-v1-…',
+  },
   groq: {
     label: 'Groq',
-    description: 'Your own Groq key for higher limits',
-    models: ['groq'],
+    description: 'Your own Groq key — GPT-OSS and Qwen 3.8 27B, with higher rate limits',
     url: 'https://console.groq.com/keys',
     steps: [
       'Go to console.groq.com and sign up',
@@ -84,7 +89,6 @@ export const KEY_CONFIGS = {
   cohere: {
     label: 'Cohere',
     description: 'Your own Cohere key for higher limits',
-    models: ['cohere'],
     url: 'https://dashboard.cohere.com/api-keys',
     steps: [
       'Go to dashboard.cohere.com and sign up',
@@ -93,39 +97,22 @@ export const KEY_CONFIGS = {
     ],
     placeholder: '…',
   },
-  gemini: {
-    label: 'Google (Gemini)',
-    description: 'Your own Gemini key for higher limits',
-    models: ['gemini'],
-    url: 'https://aistudio.google.com/apikey',
-    steps: [
-      'Go to aistudio.google.com/apikey and sign in',
-      'Click Create API Key',
-      'Copy the key starting with AIza…',
-    ],
-    placeholder: 'AIza…',
-  },
-  qwen: {
-    label: 'Qwen (OpenRouter)',
-    description: 'Your own OpenRouter key for higher Qwen limits',
-    models: ['qwen'],
-    url: 'https://openrouter.ai/keys',
-    steps: [
-      'Go to openrouter.ai and sign up',
-      'Click your avatar → Keys',
-      'Click Create Key',
-      'Copy the key starting with sk-or-v1-…',
-    ],
-    placeholder: 'sk-or-v1-…',
-  },
 }
 
-export function getAllKeys() {
+function getAllKeys() {
+  let all
   try {
-    return JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}')
+    all = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}')
   } catch {
     return {}
   }
+  if (all.openrouter) {
+    // The general OpenRouter key was retired; the same key pays for Qwen.
+    if (!all.qwen) all.qwen = all.openrouter
+    delete all.openrouter
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(all)) } catch { /* read-only storage */ }
+  }
+  return all
 }
 
 export function getKey(provider) {
@@ -148,8 +135,7 @@ export function buildUserKeys() {
   return getAllKeys()
 }
 
-/** Returns true if the model has a usable key (own key or openrouter) */
+/** True if the user saved the key that pays for this model */
 export function modelHasKey(modelKey) {
-  const keys = getAllKeys()
-  return !!(keys[providerForModel(modelKey)] || keys.openrouter)
+  return !!getAllKeys()[providerForModel(modelKey)]
 }

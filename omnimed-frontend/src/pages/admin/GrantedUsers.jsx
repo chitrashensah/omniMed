@@ -85,10 +85,10 @@ export default function GrantedUsers() {
       {/* Grant access */}
       <div className="admin-section" style={{ marginBottom: 24 }}>
         <div className="admin-section-header">
-          <span className="admin-section-title">Grant Claude & GPT-4o Access</span>
+          <span className="admin-section-title">Grant Claude & GPT Access</span>
         </div>
         <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', marginBottom: 14 }}>
-          Granted users bypass the daily free limit and use the backend API keys for Claude and GPT-4o.
+          Granted users bypass the daily free limit and use the backend API keys for every Claude and GPT model.
         </p>
         <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', flexWrap: 'wrap' }}>
           <input

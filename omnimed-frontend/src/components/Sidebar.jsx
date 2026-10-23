@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 import * as chatStore from '../lib/chatStore'
+import * as verifyStore from '../lib/verifyStore'
 import Logo from './Logo.jsx'
 import './Sidebar.css'
 
@@ -87,6 +88,7 @@ export default function Sidebar({
     try {
       await chatStore.deleteConversation(id)
       localStorage.removeItem(msgKeyFor(id))
+      verifyStore.clearSession(id)       // its cached citation checks and AI scores too
     } catch (err) {
       console.error('[Sidebar] delete failed:', err)
       localStorage.setItem(convKey, JSON.stringify(previous))

@@ -4,6 +4,9 @@ import {
 } from 'recharts'
 import * as XLSX from 'xlsx'
 import { authedFetch } from '../../lib/api'
+import { MODELS, RETIRED_MODELS } from '../../data/models.js'
+
+const MODEL_LABELS = Object.fromEntries([...MODELS, ...RETIRED_MODELS].map(m => [m.key, m.label]))
 
 const MODEL_COLOR = {
   claude: '#7c3aed', gpt4: '#15803d', gemini: '#b45309',
@@ -88,7 +91,9 @@ export default function ResearchReport() {
       const res = await authedFetch('/admin/research-report', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ narrative: withNarrative }),
+        // Model names from the site's own list, so the report labels every
+        // model — retired ones included — exactly as the chat does.
+        body: JSON.stringify({ narrative: withNarrative, labels: MODEL_LABELS }),
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || 'Failed to load report')

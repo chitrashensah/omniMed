@@ -4,17 +4,11 @@ import {
 } from 'recharts'
 import * as XLSX from 'xlsx'
 import { supabase } from '../../lib/supabase'
+import { modelInfo } from '../../data/models.js'
 
-const MODEL_LABELS = {
-  claude: 'Claude', gpt4: 'GPT-4o', gemini: 'Gemini',
-  deepseek: 'DeepSeek', groq: 'Groq', qwen: 'Qwen', cohere: 'Cohere',
-}
-const MODEL_COLOR = {
-  claude: '#7c3aed', gpt4: '#15803d', gemini: '#b45309',
-  deepseek: '#0369a1', groq: '#6d28d9', qwen: '#be185d', cohere: '#0f766e',
-}
-
-// Approx USD price per 1M tokens (input / output). Used for cost estimates only.
+// Approx USD price per 1M tokens (input / output), for cost estimates only.
+// Only the original models have a price here; a model without one shows "—"
+// and is left out of the total, which says so, rather than counting as $0.
 const PRICING = {
   claude:   { in: 3.00,  out: 15.00 },
   gpt4:     { in: 2.50,  out: 10.00 },
@@ -27,7 +21,7 @@ const PRICING = {
 
 function estCost(model, inTok, outTok) {
   const p = PRICING[model]
-  if (!p) return 0
+  if (!p) return null
   return (inTok / 1e6) * p.in + (outTok / 1e6) * p.out
 }
 
@@ -65,19 +59,20 @@ export default function Usage() {
     const outTok = Number(r.output_tokens) || 0
     return {
       model: r.model,
-      label: MODEL_LABELS[r.model] || r.model,
+      label: modelInfo(r.model).label,
       calls: Number(r.calls) || 0,
       inTok, outTok,
       totalTok: inTok + outTok,
       cacheRead: Number(r.cache_read_tokens) || 0,
       cost: estCost(r.model, inTok, outTok),
     }
-  }).sort((a, b) => b.cost - a.cost)
+  }).sort((a, b) => (b.cost ?? -1) - (a.cost ?? -1) || b.totalTok - a.totalTok)
+  const unpriced = enriched.filter(r => r.cost == null).length
 
   const totals = enriched.reduce((acc, r) => ({
     calls: acc.calls + r.calls,
     tokens: acc.tokens + r.totalTok,
-    cost: acc.cost + r.cost,
+    cost: acc.cost + (r.cost || 0),
   }), { calls: 0, tokens: 0, cost: 0 })
 
   const chartData = enriched.map(r => ({ label: r.label, model: r.model, Tokens: r.totalTok }))
@@ -127,7 +122,9 @@ export default function Usage() {
         <div className="admin-stat-card">
           <span className="admin-stat-label">Est. Total Cost</span>
           <span className="admin-stat-value" style={{ color: '#22c55e' }}>{usd(totals.cost)}</span>
-          <span className="admin-stat-sub">across all models</span>
+          <span className="admin-stat-sub">
+            {unpriced ? `excludes ${unpriced} model${unpriced === 1 ? '' : 's'} without a price` : 'across all models'}
+          </span>
         </div>
       </div>
 
@@ -142,7 +139,7 @@ export default function Usage() {
               <YAxis tick={{ fontSize: 11, fill: 'var(--text-muted)' }} axisLine={false} tickLine={false} tickFormatter={(v) => v >= 1000 ? `${(v/1000).toFixed(0)}k` : v} />
               <Tooltip contentStyle={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 8, fontSize: 12 }} formatter={(v) => [fmt(v), 'Tokens']} />
               <Bar dataKey="Tokens" radius={[6, 6, 0, 0]}>
-                {chartData.map((e, i) => <Cell key={i} fill={MODEL_COLOR[e.model] || '#0ea5e9'} />)}
+                {chartData.map((e, i) => <Cell key={i} fill={modelInfo(e.model).color} />)}
               </Bar>
             </BarChart>
           </ResponsiveContainer>
@@ -188,7 +185,7 @@ export default function Usage() {
                     <td style={{ color: 'var(--text-muted)' }}>{fmt(r.outTok)}</td>
                     <td style={{ color: 'var(--text-muted)' }}>{fmt(r.cacheRead)}</td>
                     <td>{fmt(r.totalTok)}</td>
-                    <td style={{ fontWeight: 700, color: '#22c55e' }}>{usd(r.cost)}</td>
+                    <td style={{ fontWeight: 700, color: '#22c55e' }}>{r.cost == null ? '—' : usd(r.cost)}</td>
                   </tr>
                 ))}
               </tbody>

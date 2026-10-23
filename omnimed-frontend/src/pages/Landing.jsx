@@ -2,29 +2,28 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 import Logo from '../components/Logo.jsx'
+import { MODELS as ALL_MODELS, MAX_BOXES, modelInfo } from '../data/models.js'
 import './Landing.css'
 
-const MODELS = [
-  { name: 'Claude Sonnet 4.6', org: 'Anthropic' },
-  { name: 'GPT-4o',           org: 'OpenAI' },
-  { name: 'Gemini 2.5 Flash', org: 'Google' },
-  { name: 'DeepSeek V3',      org: 'DeepSeek' },
-  { name: 'Llama 3.3 70B',    org: 'Groq' },
-  { name: 'Qwen 2.5 72B',     org: 'OpenRouter' },
-  { name: 'Command R+',       org: 'Cohere' },
-]
+// The newest model from each provider, from the same list the chat uses, so
+// the landing page cannot advertise a model the site no longer offers.
+const ORG = { groq: 'Groq', cohere: 'Cohere' }
+const MODELS = ['opus55', 'gpt61sol', 'gemini38', 'deepseek_pro', 'qwen38flash', 'groq', 'cohere']
+  .map(modelInfo)
+  .map(m => ({ name: m.label, org: ORG[m.key] || m.group }))
+const MODEL_COUNT = ALL_MODELS.length
 
 const FEATURES = [
   {
     icon: '🧬',
     title: 'Multi-LLM Querying',
-    body: 'Send one question to seven frontier models at once and compare their answers side by side — no more tab-hopping between chatbots.',
+    body: `Choose up to ${MAX_BOXES} of ${MODEL_COUNT} models from seven providers, send one question to all of them, and compare their answers side by side.`,
     highlight: true,
   },
   {
     icon: '🔑',
     title: 'Free + Bring Your Own Key',
-    body: 'Five capable models are free for everyone. Add your own OpenRouter, Anthropic, or OpenAI key to unlock unlimited Claude and GPT-4o.',
+    body: 'Gemini, DeepSeek, Qwen, GPT-OSS and Cohere models are free for everyone. Claude and GPT models get 5 free messages a day; add your own Anthropic or OpenAI key for unlimited use.',
     highlight: true,
   },
   {
@@ -35,13 +34,13 @@ const FEATURES = [
   },
   {
     icon: '⚖️',
-    title: 'Consensus Synthesis',
-    body: 'Gemini reads every model’s response and produces a unified conclusion that surfaces agreements, flags conflicts, and ranks candidates.',
+    title: 'Consensus Verdict',
+    body: 'A separate model reads every answer and ranks the candidates by independent evidence from PubMed and ClinicalTrials.gov, not by how many models agreed.',
   },
   {
     icon: '🔎',
-    title: 'Live Literature Search',
-    body: 'Claude, GPT-4o, and Gemini search the web for recent publications so predictions stay grounded in the latest cardiovascular research.',
+    title: 'Literature & Citation Checks',
+    body: 'Give any model papers from PubMed or Europe PMC within a date range, and have every cited PMID and DOI checked: fabricated, off-topic and retracted citations are flagged.',
   },
   {
     icon: '📝',
@@ -61,8 +60,8 @@ const FEATURES = [
 ]
 
 const STEPS = [
-  { n: '01', title: 'Ask',      body: 'Pose a miRNA / ncRNA question in biomedical mode and broadcast it to all seven models simultaneously.' },
-  { n: '02', title: 'Compare',  body: 'Read structured candidate profiles side by side, then let Gemini synthesize a single consensus answer.' },
+  { n: '01', title: 'Ask',      body: 'Pose a miRNA / ncRNA question in biomedical mode and send it to every model in your boxes at once.' },
+  { n: '02', title: 'Compare',  body: 'Read structured candidate profiles side by side, check their citations, and get one verdict ranked by evidence.' },
   { n: '03', title: 'Validate', body: 'Run the candidates in the lab, score each model on the outcome, and watch the reliability profiles sharpen.' },
 ]
 
@@ -262,7 +261,7 @@ export default function Landing() {
       {/* ── CTA band ── */}
       <section className="lp-cta-band">
         <div className="lp-cta-band-inner reveal">
-          <h2 className="lp-cta-title">Ready to put seven models to work?</h2>
+          <h2 className="lp-cta-title">Ready to put {MODEL_COUNT} models to work?</h2>
           <p className="lp-cta-sub">
             {user
               ? 'Jump back into your workspace and start a new multi-LLM research session.'

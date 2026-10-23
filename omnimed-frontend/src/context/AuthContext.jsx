@@ -45,7 +45,7 @@ export function AuthProvider({ children }) {
   }
 
   const isAdmin = isAdminEmail(user?.email)
-  // Whether the user can use Claude/GPT-4o without their own key
+  // Whether the user can use Claude and GPT models without their own key
   const hasBackendAccess = !!(user && (isAdmin || isGranted))
 
   async function signInWithEmail(email, password) {

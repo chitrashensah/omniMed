@@ -1,9 +1,12 @@
 import os
 import asyncio
-import anthropic
 from flask import Blueprint, request, jsonify, g
 from routes.auth import require_auth
 from services import supabase_service, stats_service
+from routes.chat import _run_model
+
+# The model that writes the report's Results narrative.
+NARRATIVE_MODEL = "sonnet55"
 
 admin_bp = Blueprint("admin", __name__)
 
@@ -74,10 +77,12 @@ def research_report():
     if err:
         return err
 
-    want_narrative = (request.get_json(silent=True) or {}).get("narrative", False)
+    body = request.get_json(silent=True) or {}
+    want_narrative = body.get("narrative", False)
+    labels = {str(k): str(v)[:60] for k, v in (body.get("labels") or {}).items()}
 
     rows = supabase_service.get_all_validations()
-    stats = stats_service.compute_model_stats(rows)
+    stats = stats_service.compute_model_stats(rows, labels)
 
     narrative = None
     narrative_error = None
@@ -101,7 +106,7 @@ def research_report():
 
 
 async def _generate_narrative(stats: dict, rows: list):
-    """Build a prompt from the computed stats + reviewer notes and ask Gemini for
+    """Build a prompt from the computed stats + reviewer notes and ask a model for
     a formal Results-section write-up plus a thematic analysis of the notes."""
     # Compact stats table for the prompt
     lines = []
@@ -140,9 +145,9 @@ async def _generate_narrative(stats: dict, rows: list):
 
     system_prompt = (
         "You are a scientific writing assistant for a peer-reviewed biomedical paper. "
-        "The study (OmniMed) queries seven LLMs to identify therapeutic microRNA "
-        "candidates for cardiovascular disease; researchers score each model's response "
-        "1-10 against wet-lab outcomes to build a reliability profile.\n\n"
+        "The study (OmniMed) compares answers from several LLMs to identify therapeutic "
+        "microRNA candidates for cardiovascular disease; researchers score each model's "
+        "response 1-10 against wet-lab outcomes to build a reliability profile.\n\n"
         "Write TWO short sections, CONCISE and PRECISE — this goes into a manuscript, "
         "so no filler, no hedging, no generic AI phrasing:\n\n"
         "## Results\n"
@@ -166,20 +171,9 @@ async def _generate_narrative(stats: dict, rows: list):
         f"REVIEWER NOTES:\n{notes_block}"
     )
 
-    api_key = os.getenv("ANTHROPIC_API_KEY")
-    if not api_key:
-        return {"status": "error", "error": "ANTHROPIC_API_KEY not set on the server"}
-    try:
-        client = anthropic.AsyncAnthropic(api_key=api_key)
-        resp = await client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=900,   # keeps the write-up tight, not sprawling
-            system=system_prompt,
-            messages=[{"role": "user", "content": user_message}],
-        )
-        text = "".join(b.text for b in resp.content if hasattr(b, "text"))
-        return {"status": "ok", "raw_response": text}
-    except anthropic.AuthenticationError:
-        return {"status": "error", "error": "Anthropic API key invalid"}
-    except Exception as e:
-        return {"status": "error", "error": str(e)[:150]}
+    # Through the shared model table, like every other model call: same keys,
+    # same error codes (e.g. INSUFFICIENT_CREDITS) as the chat.
+    res = await _run_model(NARRATIVE_MODEL, user_message, system_prompt, "", [], [], 900)
+    if res.get("status") != "ok":
+        return {"status": "error", "error": res.get("error") or "NARRATIVE_FAILED"}
+    return {"status": "ok", "raw_response": res.get("text") or ""}

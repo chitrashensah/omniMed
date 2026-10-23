@@ -17,11 +17,6 @@ try:
 except Exception:
     _HAS_SCIPY = False
 
-MODEL_LABELS = {
-    "claude": "Claude Sonnet 4.6", "gpt4": "GPT-4o", "gemini": "Gemini 2.5 Flash",
-    "deepseek": "DeepSeek V3", "groq": "Llama 3.3 70B", "qwen": "Qwen 2.5 72B",
-    "cohere": "Command R+",
-}
 
 MIN_N_FOR_POWER = 5   # below this per group, flag as underpowered
 
@@ -57,12 +52,15 @@ def _ci95(vals: list[float]) -> tuple[float, float] | None:
     return (round(m - tcrit * se, 2), round(m + tcrit * se, 2))
 
 
-def compute_model_stats(rows: list) -> dict:
+def compute_model_stats(rows: list, labels: dict | None = None) -> dict:
     """
-    Full statistical summary for the report.
+    Full statistical summary for the report. `labels` maps model keys to the
+    names to print; the frontend sends them from its model list (data/models.js),
+    so the report names every model, including retired ones, the way the site does.
     Returns descriptive per-model stats, an overall ANOVA, pairwise comparisons,
     and power/validity flags.
     """
+    labels = labels or {}
     groups = _parse_scores(rows)
 
     descriptive = []
@@ -73,7 +71,7 @@ def compute_model_stats(rows: list) -> dict:
         ci = _ci95(vals)
         descriptive.append({
             "model": model,
-            "label": MODEL_LABELS.get(model, model),
+            "label": labels.get(model, model),
             "n": n,
             "mean": round(mean(vals), 2),
             "sd": sd,
@@ -93,7 +91,7 @@ def compute_model_stats(rows: list) -> dict:
     underpowered = any(d["n"] < MIN_N_FOR_POWER for d in descriptive) or len(testable) < 2
 
     anova = _run_anova(testable)
-    pairwise = _run_pairwise(testable)
+    pairwise = _run_pairwise(testable, labels)
 
     return {
         "descriptive": descriptive,
@@ -121,7 +119,7 @@ def _run_anova(testable: dict) -> dict | None:
         return None
 
 
-def _run_pairwise(testable: dict) -> list:
+def _run_pairwise(testable: dict, labels: dict) -> list:
     """Pairwise Welch t-tests with Bonferroni-adjusted significance threshold."""
     if not _HAS_SCIPY or len(testable) < 2:
         return []
@@ -137,8 +135,8 @@ def _run_pairwise(testable: dict) -> list:
             if math.isnan(p):
                 continue
             out.append({
-                "model_a": MODEL_LABELS.get(a, a),
-                "model_b": MODEL_LABELS.get(b, b),
+                "model_a": labels.get(a, a),
+                "model_b": labels.get(b, b),
                 "mean_diff": round(mean(testable[a]) - mean(testable[b]), 2),
                 "t": round(float(t), 3),
                 "p": round(float(p), 4),

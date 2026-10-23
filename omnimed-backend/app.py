@@ -2,13 +2,11 @@ import os
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
-from routes.compare import compare_bp, run_comparison_logic
 from routes.chat import chat_bp
 from routes.upload import upload_bp
 from routes.admin import admin_bp
 from routes.literature import literature_bp
 from routes.agent import agent_bp
-from routes.auth import require_auth
 
 load_dotenv()
 
@@ -26,7 +24,6 @@ CORS(
     methods=["GET", "POST", "OPTIONS"],
 )
 
-app.register_blueprint(compare_bp)
 app.register_blueprint(chat_bp)
 app.register_blueprint(upload_bp)
 app.register_blueprint(admin_bp)
@@ -44,7 +41,7 @@ def health():
     return jsonify({
         "status": "ok",
         "keys_configured": {
-            "openai (embeddings + GPT-4o)": has("OPENAI_API_KEY"),
+            "openai (embeddings + GPT)": has("OPENAI_API_KEY"),
             "anthropic (Claude)":           has("ANTHROPIC_API_KEY"),
             "gemini":                       has("GEMINI_API_KEY"),
             "groq":                         has("GROQ_API_KEY"),
@@ -56,12 +53,6 @@ def health():
         "rag_ready": has("OPENAI_API_KEY"),
         "admins_configured": bool(os.getenv("ADMIN_EMAILS") or os.getenv("ADMIN_EMAIL")),
     }), 200
-
-
-@app.route("/meta-analysis", methods=["POST", "OPTIONS"])
-@require_auth
-def meta_analysis_fallback():
-    return run_comparison_logic()
 
 
 @app.before_request

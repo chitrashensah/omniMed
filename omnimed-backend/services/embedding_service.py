@@ -5,8 +5,7 @@
 import os
 import openai
 
-EMBED_MODEL = "text-embedding-3-small"
-EMBED_DIMS = 1536
+EMBED_MODEL = "text-embedding-3-small"   # 1536 dims: vector(1536) in supabase_setup.sql
 
 _client: openai.OpenAI | None = None
 

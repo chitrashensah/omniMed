@@ -8,51 +8,10 @@ import DOMPurify from 'dompurify'
 import PromptSelector from '../components/PromptSelector.jsx'
 import ApiKeyModal from '../components/ApiKeyModal.jsx'
 import { BUILTIN_PROMPTS } from '../data/builtinPrompts.js'
+import { MODELS, MODEL_GROUPS, DEFAULT_BOXES, MAX_BOXES, modelInfo, modelLabel } from '../data/models.js'
 import { buildUserKeys, modelHasKey } from '../lib/apiKeys.js'
 import * as verifyStore from '../lib/verifyStore.js'
 import './Chat.css'
-
-// Keys are permanent identifiers — they are stored in `validations.model` and in
-// cached conversations, so never rename one or point it at a different model.
-// `gated` mirrors GATED_MODELS in the backend: metered at 5/day on the project's
-// keys unless the user supplies their own.
-const MODELS = [
-  // Anthropic
-  { key: 'opus55',  label: 'Claude Opus 5.5',    group: 'Anthropic', gated: true, color: '#6d28d9', bg: '#ede9fe' },
-  { key: 'opus5',   label: 'Claude Opus 5',      group: 'Anthropic', gated: true, color: '#6d28d9', bg: '#ede9fe' },
-  { key: 'fable51', label: 'Claude Fable 5.1',   group: 'Anthropic', gated: true, color: '#7e22ce', bg: '#f3e8ff' },
-  { key: 'fable5',  label: 'Claude Fable 5',     group: 'Anthropic', gated: true, color: '#7e22ce', bg: '#f3e8ff' },
-  { key: 'opus48',  label: 'Claude Opus 4.8',    group: 'Anthropic', gated: true, color: '#5b21b6', bg: '#ede9fe' },
-  { key: 'sonnet55',label: 'Claude Sonnet 5.5',  group: 'Anthropic', gated: true, color: '#7c3aed', bg: '#f5f3ff' },
-  { key: 'sonnet5', label: 'Claude Sonnet 5',    group: 'Anthropic', gated: true, color: '#7c3aed', bg: '#f5f3ff' },
-  { key: 'claude',  label: 'Claude Sonnet 4.6',  group: 'Anthropic', gated: true, color: '#8b5cf6', bg: '#f5f3ff' },
-  // OpenAI
-  { key: 'gpt6astra', label: 'GPT-6 Astra',      group: 'OpenAI', gated: true, color: '#15803d', bg: '#dcfce7' },
-  { key: 'gpt61sol',  label: 'GPT-6.1 Sol',      group: 'OpenAI', gated: true, color: '#15803d', bg: '#dcfce7' },
-  { key: 'gpt56sol',  label: 'GPT-5.6 Sol',      group: 'OpenAI', gated: true, color: '#166534', bg: '#dcfce7' },
-  { key: 'gpt55',     label: 'GPT-5.5',          group: 'OpenAI', gated: true, color: '#166534', bg: '#dcfce7' },
-  { key: 'gpt54mini', label: 'GPT-5.4 mini',     group: 'OpenAI', gated: true, color: '#047857', bg: '#d1fae5' },
-  // DeepSeek — Pro only. deepseek-flash is still listed by their API but did
-  // not answer a one-line prompt within the full 300s timeout on repeated
-  // attempts, so offering it would just hang a box.
-  { key: 'deepseek_pro',   label: 'DeepSeek V4 Pro',   group: 'DeepSeek', color: '#0369a1', bg: '#e0f2fe' },
-  // Google
-  { key: 'gemini38', label: 'Gemini 3.8 Flash',  group: 'Google', color: '#b45309', bg: '#fef3c7' },
-  { key: 'gemini36', label: 'Gemini 3.6 Flash',  group: 'Google', color: '#b45309', bg: '#fef3c7' },
-  { key: 'gemini35', label: 'Gemini 3.5 Flash',  group: 'Google', color: '#a16207', bg: '#fef9c3' },
-  { key: 'gemini',   label: 'Gemini 2.5 Flash',  group: 'Google', color: '#ca8a04', bg: '#fef3c7' },
-  // Qwen
-  { key: 'qwen38flash', label: 'Qwen 3.8 Flash', group: 'Qwen', color: '#be185d', bg: '#fce7f3' },
-  { key: 'qwen38max',   label: 'Qwen 3.8 Max',   group: 'Qwen', color: '#be185d', bg: '#fce7f3' },
-  { key: 'qwen37plus',  label: 'Qwen 3.7 Plus',  group: 'Qwen', color: '#db2777', bg: '#fce7f3' },
-  { key: 'qwen36flash', label: 'Qwen 3.6 Flash', group: 'Qwen', color: '#9d174d', bg: '#fce7f3' },
-  { key: 'qwen',        label: 'Qwen 2.5 72B',   group: 'Qwen', color: '#a21caf', bg: '#fae8ff' },
-  // Other providers
-  { key: 'groq',    label: 'Groq GPT-OSS 120B',  group: 'Other', color: '#c2410c', bg: '#ffedd5' },
-  { key: 'cohere',  label: 'Cohere Command A+',  group: 'Other', color: '#0f766e', bg: '#ccfbf1' },
-]
-
-const MODEL_GROUPS = ['Anthropic', 'OpenAI', 'DeepSeek', 'Google', 'Qwen', 'Other']
 
 const MODES = [
   { key: 'normal',     label: 'Normal',     icon: '💬', desc: 'Plain chat — no system prompt' },
@@ -68,8 +27,6 @@ function msgKey(userId, id)    { return `omnimed_msgs_${userId}_${id}` }
 
 // Which model sits in which box. Persisted so a reload keeps the workspace.
 const BOX_KEY = 'omnimed_box_models'
-const DEFAULT_BOXES = ['gemini38', 'deepseek_pro', 'groq', 'qwen38flash', 'cohere']
-const MAX_BOXES = 5
 
 function loadBoxModels() {
   try {
@@ -81,8 +38,9 @@ function loadBoxModels() {
   } catch { return DEFAULT_BOXES }
 }
 
-// Literature options offered per model. Presentational for now — selecting one
-// records the choice but nothing is sent to the backend yet.
+// Literature options per box. A box with a database gets the papers that
+// database returns for the question (within the date range) and is told to
+// cite from them; a box without one answers from training alone.
 const DATABASES = [
   { key: 'pubmed',    label: 'PubMed' },
   { key: 'europepmc', label: 'Europe PMC' },
@@ -95,6 +53,20 @@ const DATE_RANGES = [
   { key: '10y',  label: 'Past 10 years' },
   { key: 'all',  label: 'Any time' },
 ]
+
+// How many papers a box is given per question. Auto (the default, no
+// preference) gives the model the 25 best matches — the top 8 with abstracts —
+// and lets it use the relevant ones. A fixed number costs ~200 input tokens
+// per paper on every question.
+const PAPER_COUNTS = [5, 8, 15, 25]
+
+// What the four judge scores mean, shown beside them.
+const AI_DIMENSIONS = {
+  evidence:      'Claims backed by real, relevant, correctly cited sources',
+  mechanism:     'Explains how the biology works (e.g. miR-21 → SPRY1 → ERK)',
+  actionability: 'Gives a target, model system or assay a lab could test',
+  calibration:   'Confidence matches the strength of the evidence',
+}
 
 // Per-model options, keyed by model key.
 const OPTS_KEY = 'omnimed_model_opts'
@@ -158,10 +130,21 @@ function safeHtml(text) {
   return DOMPurify.sanitize(renderText(text), SANITIZE_OPTS)
 }
 
+// Every model that answered somewhere in this chat, in first-seen order —
+// including retired ones, whose answers an export must not drop.
+function modelsInChat(messages) {
+  const keys = []
+  for (const m of messages) {
+    for (const k of [...(m.activeModels || []), ...Object.keys(m.responses || {})]) {
+      if (!keys.includes(k)) keys.push(k)
+    }
+  }
+  return keys.map(modelInfo)
+}
+
 function exportCSV(messages, sessionId) {
-  // One column per model rather than a fixed trio — the old hard-coded three
-  // silently dropped every other model's answer from the export.
-  const headers = ['Turn','Role','Mode','User Message', ...MODELS.map(m => m.label), 'Conclusion']
+  const used = modelsInChat(messages)
+  const headers = ['Turn','Role','Mode','User Message', ...used.map(m => m.label), 'Conclusion']
   const rows = [headers]
   let turn = 0
   for (let i = 0; i < messages.length; i++) {
@@ -174,7 +157,7 @@ function exportCSV(messages, sessionId) {
         'User',
         msg.mode || '',
         msg.content || '',
-        ...MODELS.map(m => next?.responses?.[m.key]?.text || ''),
+        ...used.map(m => next?.responses?.[m.key]?.text || ''),
         next?.conclusion || '',
       ])
     }
@@ -196,8 +179,7 @@ function exportPrint(messages, sessionId) {
     if (msg.role === 'user') {
       return `<div class="pe-user"><strong>You (${msg.mode}):</strong><p>${escHtml(msg.content || '')}</p></div>`
     }
-    const panels = MODELS
-      .filter(m => (msg.activeModels || ['claude','gpt4','gemini']).includes(m.key))
+    const panels = (msg.activeModels || Object.keys(msg.responses || {})).map(modelInfo)
       .map(m => {
         const r = msg.responses?.[m.key]
         const text = r?.status === 'ok' ? escHtml(r.text) : `<em>${r?.error || 'no response'}</em>`
@@ -370,12 +352,36 @@ function WetLabScore({ modelKey, msgId, sessionId, disabled }) {
 // The second passes a naive existence check, so a model can look perfectly
 // sourced while citing unrelated work. Observed in testing: an answer with
 // three real PMIDs, none of them about the miRNA being discussed.
-function CitationCheck({ text, disabled, sessionId, msgId, modelKey, auto = true }) {
+// One plain sentence for the citation panel. Unconfirmed citations count:
+// "All 9 check out" was shown when 6 of the 9 could not be confirmed at all.
+function citationHeadline(r) {
+  const n = r.checked
+  const s = (k) => (k === 1 ? '' : 's')
+  const problems = r.fabricated + r.mismatched + (r.retracted || 0)
+  if (problems > 0) return `${problems} of ${n} citation${s(n)} ${problems === 1 ? 'has' : 'have'} a problem.`
+  if (r.unresolved > 0) {
+    return r.unresolved === n
+      ? `None of the ${n} citation${s(n)} could be confirmed.`
+      : `No problems found, but ${r.unresolved} of ${n} citation${s(n)} could not be confirmed.`
+  }
+  return `All ${n} citation${s(n)} check out.`
+}
+
+// Matches CHECKER_VERSION in omnimed-backend/services/literature_service.py.
+const CITATION_CHECKER_VERSION = 3
+
+// `since`: the earliest year the box's date range allows, when it has one.
+// Citations older than that are marked, so a model that ignored the range is
+// visible at a glance.
+function CitationCheck({ text, disabled, sessionId, msgId, modelKey, auto = true, since = null }) {
   // A previous check for this exact answer is reused rather than re-run —
   // verification is deterministic, so a second call to PubMed would only
-  // return the same answer more slowly.
-  const cached = (sessionId && msgId && modelKey)
+  // return the same answer more slowly. Unless the checker has changed since:
+  // a result saved by an older checker (before the full-text look, which
+  // reported reviews as "does not mention it") is re-run instead of shown.
+  const saved = (sessionId && msgId && modelKey)
     ? verifyStore.getResult(sessionId, msgId, modelKey) : null
+  const cached = (saved?.checker_version || 0) >= CITATION_CHECKER_VERSION ? saved : null
 
   const [state, setState] = useState(cached ? 'done' : 'idle')  // idle|loading|done|error
   const [result, setResult] = useState(cached)
@@ -459,13 +465,7 @@ function CitationCheck({ text, disabled, sessionId, msgId, modelKey, auto = true
             <>
               {/* A plain-language verdict, so the panel can be read without
                   adding up chips to work out whether anything is wrong. */}
-              <p className="cite-head">
-                {result.fabricated + result.mismatched + (result.retracted || 0) === 0
-                  ? `All ${result.checked} citation${result.checked !== 1 ? 's' : ''} check out.`
-                  : `${result.fabricated + result.mismatched + (result.retracted || 0)} of ${result.checked} `
-                    + `citation${result.checked !== 1 ? 's' : ''} ${
-                      result.fabricated + result.mismatched + (result.retracted || 0) === 1 ? 'has' : 'have'} a problem.`}
-              </p>
+              <p className="cite-head">{citationHeadline(result)}</p>
               <div className="cite-summary">
                 <span className="cite-stat cite-stat--ok">{result.verified} real</span>
                 {result.fabricated > 0 && (
@@ -480,6 +480,15 @@ function CitationCheck({ text, disabled, sessionId, msgId, modelKey, auto = true
                 {result.unresolved > 0 && (
                   <span className="cite-stat">{result.unresolved} unconfirmed</span>
                 )}
+                {since && (() => {
+                  const older = result.citations.filter(c => c.exists && Number(c.year) < since).length
+                  return older > 0 && (
+                    <span className="cite-stat cite-stat--warn"
+                          title={`This box's date range starts in ${since}`}>
+                      {older} older than {since}
+                    </span>
+                  )
+                })()}
               </div>
 
               <ul className="cite-list">
@@ -510,6 +519,16 @@ function CitationCheck({ text, disabled, sessionId, msgId, modelKey, auto = true
                         {/* An author-year citation is matched by search, not
                             looked up by identifier. The marker keeps that
                             visible; the detail is on hover. */}
+                        {c.support?.source === 'full text' && (
+                          <span className="cite-kind" title="Checked against the paper's open-access full text, not only its abstract">
+                            full text
+                          </span>
+                        )}
+                        {since && c.exists && Number(c.year) < since && (
+                          <span className="cite-kind" title={`Outside this box's date range (${since} onward)`}>
+                            {c.year} · older
+                          </span>
+                        )}
                         {narrative && (
                           <span className="cite-kind" title={
                             c.match
@@ -632,87 +651,157 @@ const band = (n) => n == null ? 'unknown' : n >= 7 ? 'ok' : n >= 4 ? 'warn' : 'b
 // AI judge's score, side by side but never blended. One is measured from public
 // registries; the other is a model's opinion. Averaging them would destroy the
 // only comparison that matters.
-function Scoreboard({ sessionId, modelKeys, onClose, turns }) {
+// One scoring pass over every model's answer to the latest question, rather
+// than a button per box. Scoring them together is what makes the numbers
+// comparable: same rubric, same question, and a judge that is never the model
+// being scored. Scored separately, a gap between two models would partly be
+// a gap between their judges.
+async function scoreLatestTurn({ turns, modelKeys, sessionId, user }) {
+  const turn = turns?.[turns.length - 1]
+  const a = turn?.assistant
+  if (!a) return 'empty'
+
+  const answers = {}
+  for (const k of modelKeys) {
+    const r = a.responses?.[k]
+    if (r?.status !== 'error' && r?.text) answers[k] = r.text
+  }
+  if (!Object.keys(answers).length) return 'empty'
+
+  const verifications = {}
+  for (const k of Object.keys(answers)) {
+    const v = verifyStore.getResult(sessionId, a.id, k)
+    if (v) verifications[k] = v
+  }
+  const data = await postJSON('/agent/score-all', {
+    question: turn.user?.content || '', answers, verifications,
+    user_keys: buildUserKeys(),
+  })
+  if (data?.status !== 'ok') return 'error'
+
+  const dbRows = []
+  for (const [k, sc] of Object.entries(data.scores || {})) {
+    if (typeof sc?.overall !== 'number') continue
+    verifyStore.setScore(sessionId, a.id, k, sc)
+
+    // Both layers land in their own columns on one row, keyed the way the
+    // wet-lab verdict is, so a later verdict joins them rather than making
+    // a second row. That pairing is what makes "did the automated score
+    // predict the wet-lab result?" answerable per answer.
+    const v = verifications[k] || {}
+    dbRows.push({
+      session_id: sessionId,
+      user_id: user?.id || null,
+      submitted_by: user?.email || null,
+      msg_id: String(a.id),
+      model: k,
+      db_checked: v.checked ?? null,
+      db_verified: v.verified ?? null,
+      db_fabricated: v.fabricated ?? null,
+      db_mismatched: v.mismatched ?? null,
+      db_hallucination_rate: v.hallucination_rate ?? null,
+      db_miscitation_rate: v.miscitation_rate ?? null,
+      db_detail: v.citations ? { citations: v.citations } : null,
+      db_checked_at: v.checked != null ? new Date().toISOString() : null,
+      ai_score: sc.overall,
+      ai_dimensions: sc.scores || null,
+      ai_rationale: sc.rationale || null,
+      ai_red_flags: sc.red_flags || null,
+      ai_judge_model: sc.judge || null,
+      ai_saw_verification: !!sc.saw_verification,
+      ai_scored_at: new Date().toISOString(),
+    })
+  }
+  if (dbRows.length && isUuid(sessionId)) {
+    const { error } = await supabase.from('validations')
+      .upsert(dbRows, { onConflict: 'session_id,msg_id,model' })
+    if (error) console.error('[scoreLatestTurn] Supabase upsert error:', error)
+  }
+  return 'done'
+}
+
+// The button that runs it, in the turn bar and in the Accuracy panel.
+function ScoreTurnButton({ turns, modelKeys, sessionId }) {
   const { user } = useAuth()
+  const [state, setState] = useState('idle')
+  const latestId = turns?.[turns.length - 1]?.assistant?.id
+  useEffect(() => { setState('idle') }, [latestId])   // a new question can be scored again
+
+  async function run() {
+    if (state === 'loading') return
+    setState('loading')
+    try { setState(await scoreLatestTurn({ turns, modelKeys, sessionId, user })) }
+    catch { setState('error') }
+  }
+
+  return (
+    <button
+      className={`chat-scoreboard-btn chat-score-btn ${state === 'done' ? 'chat-scoreboard-btn--on' : ''}`}
+      onClick={run}
+      disabled={state === 'loading' || !latestId}
+      title="A different model scores every answer to the latest question, blind to who wrote it. An opinion, not a measurement."
+    >
+      {state === 'loading' ? 'Scoring…'
+        : state === 'error' ? '↻ Scoring failed'
+        : state === 'empty' ? 'Nothing to score'
+        : state === 'done' ? '✓ Scored'
+        : 'AI score'}
+    </button>
+  )
+}
+
+// One answer's AI score, beside its Citations button. Only shown once scored.
+function AiScore({ sessionId, msgId, modelKey }) {
   const [, force] = useState(0)
-  const [scoring, setScoring] = useState('idle')
+  const [open, setOpen] = useState(false)
+  useEffect(() => verifyStore.subscribe(() => force(n => n + 1)), [])
+  const sc = verifyStore.getScore(sessionId, msgId, modelKey)
+  if (!sc || typeof sc.overall !== 'number') return null
+
+  const judge = modelLabel(sc.judge)
+  return (
+    <>
+      <button
+        className={`mbox-act cite-btn cite-btn--ai cite-btn--${band(sc.overall)}`}
+        onClick={() => setOpen(v => !v)}
+        title="A different model's rubric score, 1-10. An opinion, not a measurement."
+      >
+        AI {sc.overall}/10
+      </button>
+      {open && (
+        <div className="cite-panel">
+          <p className="cite-head">
+            {sc.overall}/10: the average of four scores from {judge}, which was not told which model wrote this.
+          </p>
+          {sc.scores && (
+            <ul className="ai-dims">
+              {Object.entries(AI_DIMENSIONS).filter(([k]) => sc.scores[k] != null).map(([k, meaning]) => (
+                <li key={k}>
+                  <span className={`cite-stat cite-stat--${band(sc.scores[k])}`}>{k} {sc.scores[k]}</span>
+                  <span className="ai-dim-meaning">{meaning}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+          {sc.rationale && <p className="cite-foot" style={{ marginTop: 0 }}>{sc.rationale}</p>}
+          {sc.red_flags?.length > 0 && (
+            <ul className="cite-list">
+              {sc.red_flags.map((f, i) => <li key={i}>{f}</li>)}
+            </ul>
+          )}
+        </div>
+      )}
+    </>
+  )
+}
+
+function Scoreboard({ sessionId, modelKeys, onClose, turns }) {
+  const [, force] = useState(0)
   useEffect(() => verifyStore.subscribe(() => force(n => n + 1)), [])
 
   const rows = verifyStore.aggregate(sessionId, modelKeys)
     .filter(r => r.answers > 0)
     .sort((a, b) => (b.accuracy ?? -1) - (a.accuracy ?? -1))
-
-  // One scoring pass over every model's answer to the latest question, rather
-  // than a button per box. Scoring them together is what makes the numbers
-  // comparable: same rubric, same question, and a judge that is never the model
-  // being scored. Scored separately, a gap between two models would partly be
-  // a gap between their judges.
-  async function scoreAll() {
-    const turn = turns?.[turns.length - 1]
-    const a = turn?.assistant
-    if (!a || scoring === 'loading') return
-
-    const answers = {}
-    for (const k of modelKeys) {
-      const r = a.responses?.[k]
-      if (r?.status !== 'error' && r?.text) answers[k] = r.text
-    }
-    if (!Object.keys(answers).length) return
-
-    setScoring('loading')
-    try {
-      const verifications = {}
-      for (const k of Object.keys(answers)) {
-        const v = verifyStore.getResult(sessionId, a.id, k)
-        if (v) verifications[k] = v
-      }
-      const data = await postJSON('/agent/score-all', {
-        question: turn.user?.content || '', answers, verifications,
-        user_keys: buildUserKeys(),
-      })
-      if (data?.status !== 'ok') { setScoring('error'); return }
-
-      const dbRows = []
-      for (const [k, sc] of Object.entries(data.scores || {})) {
-        if (typeof sc?.overall !== 'number') continue
-        verifyStore.setScore(sessionId, a.id, k, sc)
-
-        // Both layers land in their own columns on one row, keyed the way the
-        // wet-lab verdict is, so a later verdict joins them rather than making
-        // a second row. That pairing is what makes "did the automated score
-        // predict the wet-lab result?" answerable per answer.
-        const v = verifications[k] || {}
-        dbRows.push({
-          session_id: sessionId,
-          user_id: user?.id || null,
-          submitted_by: user?.email || null,
-          msg_id: String(a.id),
-          model: k,
-          db_checked: v.checked ?? null,
-          db_verified: v.verified ?? null,
-          db_fabricated: v.fabricated ?? null,
-          db_mismatched: v.mismatched ?? null,
-          db_hallucination_rate: v.hallucination_rate ?? null,
-          db_miscitation_rate: v.miscitation_rate ?? null,
-          db_detail: v.citations ? { citations: v.citations } : null,
-          db_checked_at: v.checked != null ? new Date().toISOString() : null,
-          ai_score: sc.overall,
-          ai_dimensions: sc.scores || null,
-          ai_rationale: sc.rationale || null,
-          ai_red_flags: sc.red_flags || null,
-          ai_judge_model: sc.judge || null,
-          ai_saw_verification: !!sc.saw_verification,
-          ai_scored_at: new Date().toISOString(),
-        })
-      }
-      if (dbRows.length && isUuid(sessionId)) {
-        const { error } = await supabase.from('validations')
-          .upsert(dbRows, { onConflict: 'session_id,msg_id,model' })
-        if (error) console.error('[Scoreboard] Supabase upsert error:', error)
-      }
-      setScoring('done')
-    } catch { setScoring('error') }
-  }
 
   const pct = (v) => v == null ? '—' : `${Math.round(v * 100)}%`
 
@@ -720,12 +809,9 @@ function Scoreboard({ sessionId, modelKeys, onClose, turns }) {
     <div className="scoreboard">
       <div className="scoreboard-head">
         <strong>Model accuracy this session</strong>
-        <button className="council-more" style={{ marginLeft: 'auto', marginBottom: 0 }}
-                onClick={scoreAll} disabled={scoring === 'loading'}>
-          {scoring === 'loading' ? 'Scoring…'
-            : scoring === 'error' ? '↻ Scoring failed'
-            : 'Score latest answers'}
-        </button>
+        <span style={{ marginLeft: 'auto' }}>
+          <ScoreTurnButton turns={turns} modelKeys={modelKeys} sessionId={sessionId} />
+        </span>
         <button className="scoreboard-close" onClick={onClose} title="Close">✕</button>
       </div>
 
@@ -747,7 +833,7 @@ function Scoreboard({ sessionId, modelKeys, onClose, turns }) {
             </thead>
             <tbody>
               {rows.map(r => {
-                const m = MODELS.find(x => x.key === r.model)
+                const m = modelInfo(r.model)
                 const a = r.accuracy
                 return (
                   <tr key={r.model}>
@@ -800,14 +886,14 @@ function ErrorText({ error }) {
         : error === 'TIMEOUT'
         ? 'Model timed out. Reasoning models can take several minutes on long research questions — try a narrower question, or a faster model.'
         : error === 'REFUSED'
-        ? 'This model declined the request. Claude Fable 5 runs safety classifiers over research-biology topics and can decline legitimate biomedical questions — try Opus 5 or Sonnet 5 instead.'
+        ? 'This model declined the request. Claude Fable models run safety classifiers over research-biology topics and can decline legitimate biomedical questions — try Claude Opus or Sonnet instead.'
         : error === 'TRUNCATED_BEFORE_ANSWER'
         ? 'The model used its whole token budget reasoning and produced no answer. Try a narrower question.'
         : error === 'EMPTY_RESPONSE'
         ? 'The model returned an empty response.'
         : error === 'INSUFFICIENT_CREDITS'
-        ? <>Out of OpenRouter credits — this model could not be paid for. Top up at
-           openrouter.ai/credits, or <button className="model-panel-link" onClick={openKeys}>add your own key</button>.</>
+        ? <>The provider account behind this model is out of credits (Anthropic, OpenAI or
+           OpenRouter). Top up that account, or <button className="model-panel-link" onClick={openKeys}>add your own key</button>.</>
         : error === 'USAGE_LIMIT'
         ? 'This provider\'s API usage limit has been reached. Raise the spend cap in the provider console, or use a different model.'
         : error === 'SERVICE_UNAVAILABLE'
@@ -903,7 +989,24 @@ function ModelTurn({ turn, modelKey, sessionId }) {
               sessionId={sessionId}
               msgId={assistant.id}
               modelKey={modelKey}
+              since={response.grounding?.since || null}
             />
+          )}
+          {isOk && <AiScore sessionId={sessionId} msgId={assistant.id} modelKey={modelKey} />}
+          {response.grounding && (
+            <span
+              className="mbox-served"
+              title="Papers this model was given for the question, from the box's database setting"
+            >
+              {response.grounding.error
+                ? '📚 literature search failed'
+                : `📚 ${response.grounding.papers} paper${response.grounding.papers === 1 ? '' : 's'}${
+                    response.grounding.requested === 'auto' ? ' (auto)'
+                    : response.grounding.requested > response.grounding.papers
+                      ? ` (asked for ${response.grounding.requested})` : ''} · ${
+                    response.grounding.db === 'pubmed' ? 'PubMed' : 'Europe PMC'}${
+                    response.grounding.since ? ` since ${response.grounding.since}` : ''}`}
+            </span>
           )}
           {isOk && response.served_model && (
             // The provider's own report of which model ran. Models are
@@ -989,7 +1092,7 @@ function CouncilVerdict({ verdict, judge }) {
       )}
 
       <p className="cite-foot">
-        Synthesised by {MODELS.find(m => m.key === judge)?.label || judge || 'a separate model'},
+        Synthesised by {judge ? modelLabel(judge) : 'a separate model'},
         which saw each answer's citation-check result but not which model wrote it.
       </p>
     </div>
@@ -1038,15 +1141,14 @@ function ModelBox({ modelKey, onModelChange, takenModels, turns, sessionId,
         </button>
       </div>
 
-      {/* Per-model literature options. Placeholders — nothing is sent to the
-          backend yet. Kept per box because one model may be given literature
-          while another answers from training alone. */}
+      {/* Per-model literature options. Kept per box because one model may be
+          given literature while another answers from training alone. */}
       <div className="mbox-tools">
         <select
           className={`mbox-tool ${o.db ? 'mbox-tool--on' : ''}`}
           value={o.db || ''}
           onChange={e => onOptsChange({ ...o, db: e.target.value })}
-          title={`Literature source for ${model.label} (not wired up yet)`}
+          title={`Give ${model.label} papers from this database for each question`}
         >
           <option value="">📚 Select database</option>
           {DATABASES.map(d => <option key={d.key} value={d.key}>{d.label}</option>)}
@@ -1055,12 +1157,21 @@ function ModelBox({ modelKey, onModelChange, takenModels, turns, sessionId,
           className={`mbox-tool ${o.dates ? 'mbox-tool--on' : ''}`}
           value={o.dates || ''}
           onChange={e => onOptsChange({ ...o, dates: e.target.value })}
-          title={`Publication date range for ${model.label} (not wired up yet)`}
+          title={`Only papers published in this range (needs a database)`}
         >
           <option value="">📅 Date range</option>
           {DATE_RANGES.map(d => <option key={d.key} value={d.key}>{d.label}</option>)}
         </select>
-        {(o.db || o.dates) && <span className="mbox-optnote">not active yet</span>}
+        <select
+          className={`mbox-tool ${o.papers ? 'mbox-tool--on' : ''}`}
+          value={o.papers || ''}
+          onChange={e => onOptsChange({ ...o, papers: e.target.value ? Number(e.target.value) : undefined })}
+          title={`How many papers ${model.label} is given per question. Auto lets the model choose from the 25 best matches; a fixed number costs about 200 tokens per paper.`}
+        >
+          <option value="">📄 Papers: auto</option>
+          {PAPER_COUNTS.map(n => <option key={n} value={n}>{n} papers</option>)}
+        </select>
+        {(o.dates || o.papers) && (!o.db || o.db === 'none') && <span className="mbox-optnote">pick a database</span>}
       </div>
 
       <div className="mbox-body">
@@ -1110,7 +1221,7 @@ function ConclusionBox({ turns, maximized, onToggleMax, onGenerate }) {
           <p className="mbox-empty">The synthesis across all models appears here.</p>
         ) : turns.map(t => {
           const a       = t.assistant
-          const active  = MODELS.filter(m => (a?.activeModels || []).includes(m.key))
+          const active  = (a?.activeModels || []).map(modelInfo)
           const allDone = !!a && active.length > 0 &&
             active.every(m => a.responses?.[m.key] && a.responses[m.key].status !== undefined)
           const isLast  = t.user.id === lastId
@@ -1333,7 +1444,7 @@ export default function Chat() {
   // Falls back to a local id only if the DB write fails (offline / RLS).
   // Open API keys modal from sidebar button
   useEffect(() => {
-    const handler = () => setApiKeyModal('openrouter')
+    const handler = () => setApiKeyModal('claude')
     window.addEventListener('omnimed:open_api_keys', handler)
     return () => window.removeEventListener('omnimed:open_api_keys', handler)
   }, [])
@@ -1447,10 +1558,32 @@ export default function Chat() {
       return history.slice(-12)
     }
 
+    // Earlier questions (same mode) this model never answered — it was not in
+    // a box yet, or it failed. Sent as the questions only, so a model joining
+    // mid-chat knows the topic without seeing the other models' answers.
+    function missedQuestions(modelKey, existingMessages, currentMode) {
+      const missed = []
+      let question = null
+      for (const m of existingMessages) {
+        if (m.mode !== currentMode) continue
+        if (m.role === 'user') {
+          question = m.content || null
+        } else if (m.role === 'assistant' && question) {
+          const r = m.responses?.[modelKey]
+          if (r?.status !== 'ok' && r?.status !== 'stopped') missed.push(question)
+          question = null
+        }
+      }
+      return missed.slice(-3)
+    }
+
     // One backend call fans out to all selected models; results stream back
     // over SSE and we render each panel the moment its model finishes.
     const histories = {}
     for (const key of selectedModels) histories[key] = buildHistory(key, messages, mode)
+    const missed = Object.fromEntries(selectedModels
+      .map(k => [k, missedQuestions(k, messages, mode)])
+      .filter(([, qs]) => qs.length))
 
     const received = new Set()
     const finalResponses = {}
@@ -1490,7 +1623,12 @@ export default function Chat() {
     try {
       await askStream(
         { message: text, models: selectedModels, mode, session_id: sid, histories, attachments: readyAtts,
-          system_prompt: resolvePromptContent(), user_keys: buildUserKeys(), web_search: webSearch },
+          system_prompt: resolvePromptContent(), user_keys: buildUserKeys(), web_search: webSearch,
+          missed_questions: missed,
+          literature: Object.fromEntries(selectedModels
+            .filter(k => modelOpts[k]?.db && modelOpts[k].db !== 'none')
+            .map(k => [k, { db: modelOpts[k].db, dates: modelOpts[k].dates || 'all',
+                            papers: modelOpts[k].papers || 'auto' }])) },
         {
           signal,
           onModel: ({ model, response }) => applyResponse(model, response),
@@ -1519,13 +1657,13 @@ export default function Chat() {
     // Only include models that actually responded
     const modelResponses = {}
     const modelLabels = {}
-    MODELS.filter(m => (activeModels || []).includes(m.key)).forEach(m => {
+    for (const m of (activeModels || []).map(modelInfo)) {
       const text = responses[m.key]?.text || responses[m.key]?.raw_response
       if (text) {
         modelResponses[m.key] = text
         modelLabels[m.key] = m.label
       }
-    })
+    }
 
     // The citation checks already ran automatically for this turn, so the
     // council is told which answers held up rather than having to take every
@@ -1671,6 +1809,7 @@ export default function Chat() {
               </div>
             </>
           )}
+          <ScoreTurnButton turns={turns} modelKeys={boxModels} sessionId={sessionId} />
           <button
             className={`chat-scoreboard-btn ${showScoreboard ? 'chat-scoreboard-btn--on' : ''}`}
             onClick={() => setShowScoreboard(v => !v)}
@@ -1832,7 +1971,7 @@ export default function Chat() {
 
       {apiKeyModal && (
         <ApiKeyModal
-          initialTab={apiKeyModal === 'claude' ? 'claude' : apiKeyModal === 'gpt4' ? 'gpt4' : 'openrouter'}
+          initialTab={apiKeyModal}
           onClose={() => setApiKeyModal(null)}
         />
       )}

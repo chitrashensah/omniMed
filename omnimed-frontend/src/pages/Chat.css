@@ -291,6 +291,8 @@
   white-space: nowrap;
 }
 .chat-scoreboard-btn:hover { color: var(--text); border-color: var(--primary); }
+/* "AI score" sits right after the question pills; Accuracy keeps the far right. */
+.chat-turnbar .chat-score-btn { margin-left: 8px; }
 .chat-scoreboard-btn--on {
   background: var(--primary);
   border-color: var(--primary);
@@ -771,6 +773,12 @@
 }
 
 .cite-summary { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 8px; }
+
+/* AI score panel: each judge dimension beside what it measures */
+.ai-dims { list-style: none; margin: 0 0 8px; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.ai-dims li { display: flex; align-items: baseline; gap: 8px; }
+.ai-dims .cite-stat { min-width: 108px; text-align: center; flex-shrink: 0; }
+.ai-dim-meaning { font-size: 0.72rem; color: var(--text-muted); line-height: 1.35; }
 .cite-stat {
   font-family: var(--font-body, Inter, sans-serif);
   font-size: 0.62rem;

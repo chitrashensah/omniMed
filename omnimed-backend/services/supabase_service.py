@@ -5,7 +5,7 @@
 #   • documents (per-session uploaded file text, injected into prompts)
 #   • usage logging (per-model token accounting)
 #   • session turn appends (atomic, via RPC)
-#   • per-model daily quota for gated models (Claude / GPT-4o)
+#   • per-model daily quota for gated models (Claude and GPT)
 #   • admin-granted "unlimited access" users
 #
 # All table definitions live in supabase_setup.sql — run that once in the
@@ -126,12 +126,12 @@ def append_turn(session_id: str, role: str, content: str) -> None:
         pass
 
 
-# ── User Quota (per-model daily free limit for Claude/GPT-4o) ──────────────
+# ── User Quota (per-model daily free limit for Claude and GPT) ────────────
 
 def check_and_increment_user_quota(user_id: str, today: str, model: str) -> int:
     """
     Atomically increment the user's daily count for a specific gated model
-    (Claude and GPT-4o are tracked separately). Returns the new count.
+    (each Claude and GPT model is tracked separately). Returns the new count.
     """
     result = _get_client().rpc(
         "increment_user_quota",

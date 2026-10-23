@@ -23,6 +23,7 @@ import re
 import time
 import asyncio
 import hashlib
+import threading
 from dataclasses import dataclass, field, asdict
 
 import httpx
@@ -50,19 +51,29 @@ SOURCES = ("europepmc", "pubmed", "trials")
 class _RateLimiter:
     """NCBI caps at 3 requests/second (10 with an API key). Exceeding it gets
     the whole project's IP throttled, so this is a hard serialisation point
-    rather than a best-effort delay."""
+    rather than a best-effort delay.
+
+    Each caller reserves the next free slot under a threading lock and then
+    sleeps until it. It used an asyncio.Lock before, but every Flask request
+    runs its own event loop (asyncio.run), and an asyncio.Lock binds to the
+    first loop that waits on it: from the second request on, any concurrent
+    lookup raised "bound to a different event loop", which surfaced as
+    "Lookup failed" on perfectly findable citations. A threading lock is shared
+    by every loop and thread, and is never held across an await.
+    """
 
     def __init__(self, per_second: float):
         self._interval = 1.0 / per_second
-        self._lock = asyncio.Lock()
-        self._last = 0.0
+        self._lock = threading.Lock()
+        self._next = 0.0
 
     async def wait(self):
-        async with self._lock:
-            gap = time.monotonic() - self._last
-            if gap < self._interval:
-                await asyncio.sleep(self._interval - gap)
-            self._last = time.monotonic()
+        with self._lock:
+            slot = max(time.monotonic(), self._next)
+            self._next = slot + self._interval
+        delay = slot - time.monotonic()
+        if delay > 0:
+            await asyncio.sleep(delay)
 
 
 _ncbi_limiter = _RateLimiter(9.0 if NCBI_API_KEY else 2.5)
@@ -382,7 +393,7 @@ async def search(query: str, sources=SOURCES, limit: int = MAX_RESULTS_DEFAULT,
 # "PubMed ID - 12345678". Matching only bare "PMID: 12345678" silently found
 # zero citations in real answers, which would have made this whole layer
 # look like every model cites nothing.
-PMID_RE = re.compile(r"\b(?:PMID|PubMed\s*ID)\b[\s:*_\-\[\]()]{0,8}(\d{6,9})\b", re.I)
+PMID_RE = re.compile(r"\b(?:PMIDs?|PubMed\s*ID)\b[\s:*_\-\[\]()]{0,8}(\d{6,9})\b", re.I)
 DOI_RE = re.compile(r"\b(10\.\d{4,9}/[^\s\)\]\},;\"'*<>]+)", re.I)
 
 
@@ -390,7 +401,10 @@ DOI_RE = re.compile(r"\b(10\.\d{4,9}/[^\s\)\]\},;\"'*<>]+)", re.I)
 # often as with "-". Every regex here matches only ASCII "-", so such an answer
 # looked like it named no candidates and cited nothing checkable (observed with
 # GPT-OSS, 2026-10-21). Normalised on the way in; display text is untouched.
-_HYPHENS = str.maketrans({c: "-" for c in "\u2010\u2011\u2012\u2013\u2014\u2212\ufe63\uff0d"})
+# GPT-OSS also writes full-width punctuation ("PMID：38612441"), which the
+# identifier patterns did not match, so its citations went uncounted.
+_HYPHENS = str.maketrans({**{c: "-" for c in "\u2010\u2011\u2012\u2013\u2014\u2212\ufe63\uff0d"},
+                          "\uff1a": ":", "\uff3b": "[", "\uff3d": "]", "\uff08": "(", "\uff09": ")"})
 
 
 def normalize_text(text: str) -> str:
@@ -545,6 +559,11 @@ NOT_GENES = {
     "NOT", "THE", "IN", "OF", "A", "I", "II", "III", "IV", "V", "VI", "NA", "KCL",
     "PBS", "ELISA", "WB", "IHC", "FACS", "SEM", "SD", "CI", "ANOVA", "NS", "BP",
     "HR", "AAV", "AAV9", "SHAM", "PI", "USD", "AI", "LLM", "GPT",
+    # Journal, database and agency abbreviations, read as gene symbols before:
+    # a claim "concerns BMJ" was compared with a paper that "concerns CINAHL".
+    "BMJ", "JAMA", "NEJM", "PLOS", "PNAS", "JACC", "EHJ", "CINAHL", "EMBASE",
+    "MEDLINE", "EPOC", "GRADE", "PRISMA", "WHO", "EU", "UK", "USA", "AHA", "ACC",
+    "ESC", "AASLD", "NCBI", "URL", "HTML", "PDF",
 }
 
 
@@ -703,13 +722,146 @@ def assess_citation_support(claim_context: str, paper: dict) -> dict:
                        f"does not mention it")}
 
 
+# ── Full-text second look ──────────────────────────────────────────────────
+# The support check reads the title and abstract, which is all PubMed gives.
+# A review's abstract rarely names every molecule it covers: "MicroRNAs and
+# Cardiovascular Disease Risk" (PMID 38206553) discusses miR-146a and miR-155
+# in its body but names neither in its abstract, and was reported as "does not
+# mention it". For a flagged citation, the open-access full text (Europe PMC)
+# is checked before the verdict stands.
+FULLTEXT_CHECKS = 8                    # flagged citations re-checked per answer
+
+# Bumped whenever a change would give a different verdict on the same answer,
+# so clients holding a saved result from an older checker re-run it instead of
+# showing a stale verdict. 2 = full-text second look, topic-checked Crossref
+# fallback, author-name fixes; 3 = NCBI PubMed Central as a second source.
+CHECKER_VERSION = 3
+FULLTEXT_MAX_CHARS = 600_000
+
+
+# What a full-text source reports: the article XML, None when it has no open
+# full text for this paper, or _FAILED when the lookup itself failed (worth
+# retrying later, so not cached).
+_FAILED = object()
+
+
+async def _europepmc_fulltext(client: httpx.AsyncClient, pmid: str):
+    try:
+        r = await client.get(f"{EUROPEPMC}/search", params={
+            "query": f"EXT_ID:{pmid} AND SRC:MED", "format": "json", "resultType": "lite"})
+        r.raise_for_status()
+        items = (r.json().get("resultList", {}) or {}).get("result", []) or []
+        it = items[0] if items else {}
+        if not it.get("pmcid") or it.get("isOpenAccess") != "Y":
+            return None
+        x = await client.get(f"{EUROPEPMC}/{it['pmcid']}/fullTextXML")
+        x.raise_for_status()
+        return x.text
+    except Exception:
+        return _FAILED
+
+
+async def _ncbi_fulltext(client: httpx.AsyncClient, pmid: str):
+    """The same PubMed Central text, from NCBI: PMID → PMC id → article XML.
+
+    The backup when Europe PMC is down or does not return the paper. Some
+    PubMed Central articles come back without their body (the publisher does
+    not allow full-text download); a title page is not a full text, so that
+    counts as none.
+    """
+    try:
+        await _ncbi_limiter.wait()
+        r = await client.get(f"{EUTILS}/elink.fcgi", params=_ncbi_params(
+            dbfrom="pubmed", db="pmc", id=pmid, retmode="json"))
+        r.raise_for_status()
+        pmc = [link for ls in r.json().get("linksets", [])
+               for db in ls.get("linksetdbs", []) if db.get("linkname") == "pubmed_pmc"
+               for link in db.get("links", [])]
+        if not pmc:
+            return None
+        await _ncbi_limiter.wait()
+        x = await client.get(f"{EUTILS}/efetch.fcgi", params=_ncbi_params(db="pmc", id=pmc[0]))
+        x.raise_for_status()
+        return x.text if "<body" in x.text else None
+    except Exception:
+        return _FAILED
+
+
+async def _fulltext_terms(client: httpx.AsyncClient, pmid: str) -> str | None:
+    """The RNA and gene names in a paper's open-access full text, as one
+    string, or None when there is no open full text (or the lookups failed).
+
+    Europe PMC first, NCBI's PubMed Central second: both serve the same
+    open-access archive, so the second matters when the first is down or
+    misses a paper. No AI is involved — free public APIs and text matching.
+    Only the names are kept, not the text: a review runs to hundreds of KB,
+    and the support check needs nothing else from it.
+    """
+    key = _cache_key("fulltext", pmid)
+    hit = _cache_get(key)
+    if hit is not None:
+        return hit or None
+    outcomes = []
+    for source in (_europepmc_fulltext, _ncbi_fulltext):
+        xml = await source(client, pmid)
+        if isinstance(xml, str):
+            body = normalize_text(re.sub(r"<[^>]+>", " ", xml[:FULLTEXT_MAX_CHARS]))
+            terms = " ".join(sorted(_rna_entities(body)) + sorted(_targets(body)))
+            _cache_put(key, terms)
+            return terms
+        outcomes.append(xml)
+    if all(o is None for o in outcomes):
+        _cache_put(key, "")              # both say: no open full text
+    return None
+
+
+async def _second_look(client: httpx.AsyncClient, cite: dict, claim_context: str) -> None:
+    """Re-check a citation flagged from its abstract, in place."""
+    pmid = cite.get("pmid") or (cite["id"] if cite.get("type") == "pmid" else "")
+    terms = await _fulltext_terms(client, pmid) if pmid else None
+    if terms:
+        res = assess_citation_support(claim_context, {"title": cite.get("title", ""),
+                                                      "abstract": terms})
+        if res["support"] == "supported":
+            claimed = {_mir_family(e) for e in _rna_entities(claim_context)}
+            present = {_mir_family(e) for e in _rna_entities(terms)}
+            missing = sorted(claimed - present)
+            reason = f"the full text discusses {', '.join(res.get('matched') or [])}"
+            if missing:
+                reason += f"; it does not mention {', '.join(missing)}"
+            cite["support"] = {**res, "reason": reason, "source": "full text"}
+        else:
+            cite["support"] = {**cite["support"], "source": "full text",
+                               "reason": cite["support"]["reason"] + " (full text checked too)"}
+        return
+    # No open full text. A paper on the claim's subject may well discuss the
+    # molecule in its body, so an absence from the abstract alone is not a
+    # miscitation. A paper on another subject (an ADHD study cited for miR-21)
+    # still is.
+    shared, _ = _topical_overlap(claim_context, cite)
+    if shared >= 2:
+        cite["support"] = {"support": "unknown", "source": "abstract",
+                           "reason": "not named in the title or abstract, and the full "
+                                     "text is not openly available to check"}
+
+
 # Narrative citations: "Klattenhoff et al., Cell, 2013". Models cite this way
 # constantly, and checking only PMIDs/DOIs gave those answers a free pass —
 # a model that cites in prose looked like it cited nothing, while one that
 # supplied PMIDs got scrutinised. That biases the comparison, so these are
 # resolved too.
+# The optional particle keeps "van Rooij" whole. Captured as "Rooij", the
+# PubMed author search missed the paper and the citation came back unfound.
+# Initials after the surname ("Boon RA et al.", "van Rooij E, et al.") are
+# skipped: without that, "RA" and "AJ" were taken as surnames, and "AJ 2010"
+# resolved to an unrelated paper on neighbourhood safety.
+# In "Yang B, Lin H, et al." the first author is the one PubMed indexes the
+# paper under, so co-authors listed before "et al." are matched but skipped.
+_SURNAME = (r"(?:(?:[Vv]an|[Vv]on|[Dd]e|[Dd]er|[Dd]en|[Dd]i|[Dd]a|[Dd]u|[Ll]e|[Ll]a|[Dd]el|[Dd]os)\s+){0,2}"
+            r"[A-Z][a-zA-ZÀ-ɏ'\-]{1,24}")
+_INITIALS = r"(?:\s+[A-Z]{1,3}\.?){0,2}"
 NARRATIVE_RE = re.compile(
-    r"\b([A-Z][a-zA-ZÀ-ɏ'\-]{1,24})\s*(?:et\s+al\.?|and\s+colleagues)"
+    rf"\b({_SURNAME}){_INITIALS}(?:,\s*{_SURNAME}{_INITIALS}){{0,3}},?\s*(?:et\s+al\.?|and\s+colleagues)"
     r"[^.\n;]{0,90}?\b((?:19|20)\d{2})\b")
 
 
@@ -832,7 +984,7 @@ async def _pubmed_narrative(client: httpx.AsyncClient, cite: dict,
 
 
 async def _crossref_narrative(client: httpx.AsyncClient, cite: dict,
-                              entities: set) -> dict | None:
+                              entities: set, claim_context: str = "") -> dict | None:
     """Fallback for venues PubMed does not index — books, society abstracts,
     non-biomedical journals. Scoped by author so the year check means something.
     """
@@ -849,6 +1001,7 @@ async def _crossref_narrative(client: httpx.AsyncClient, cite: dict,
         return None
 
     journal = _plausible_journal(cite.get("journal", "")).lower()
+    claim_targets = _targets(claim_context)
     best = None
     for it in items:
         first = ((it.get("author") or [{}])[0].get("family") or "").lower()
@@ -856,6 +1009,16 @@ async def _crossref_narrative(client: httpx.AsyncClient, cite: dict,
         if first != cite["author"].lower() or str(parts[0] or "") != cite["year"]:
             continue
         title = _clean((it.get("title") or [""])[0], 300)
+        # Same surname and year is not the same paper. Accepted on that alone,
+        # "Thum 2008" resolved to "Cardiac Dissonance Without Conductors" and
+        # "Boon 2013" to a paper on pipe-laying ships, both shown as Real. The
+        # title must name the molecule or a target from the claim; otherwise
+        # the citation stays unconfirmed for a human to check.
+        title_rnas = {_mir_family(e) for e in _rna_entities(title)}
+        on_topic = (title_rnas & {_mir_family(e) for e in entities}) or \
+                   (claim_targets and claim_targets & _targets(title))
+        if not on_topic:
+            continue
         container = (it.get("container-title") or [""])[0]
         # A conference abstract and the full paper it became often share author
         # and year; prefer the paper, and prefer the journal the model named.
@@ -908,7 +1071,7 @@ async def resolve_narrative(client: httpx.AsyncClient, cite: dict,
         _cache_put(key, out)
         return out
 
-    cross = await _crossref_narrative(client, cite, entities)
+    cross = await _crossref_narrative(client, cite, entities, claim_context)
     if cross:
         out.update({"exists": True, **cross, "match": "crossref author+year"})
         _cache_put(key, out)
@@ -963,7 +1126,9 @@ def extract_unsourced_claims(text: str) -> list[dict]:
 
     out = []
     for raw_line in (text or "").splitlines():
-        line = raw_line.strip(" -*•\t")
+        # Markdown would otherwise reach both the PubMed query and the screen
+        # ("Regulatory axis:** miR-21 → PTEN↓").
+        line = re.sub(r"\*\*|__|`|^#+\s*", "", raw_line).strip(" -*•\t")
         if len(line) < 25:
             continue
         if any(span in raw_line for span in cited_spans):
@@ -1248,7 +1413,8 @@ async def verify_citations(text: str) -> dict:
     if not ids and not narrative:
         return {"checked": 0, "verified": 0, "fabricated": 0, "unresolved": 0,
                 "mismatched": 0, "hallucination_rate": None,
-                "miscitation_rate": None, "citations": []}
+                "miscitation_rate": None, "citations": [],
+                "checker_version": CHECKER_VERSION}
 
     async with httpx.AsyncClient(timeout=TIMEOUT,
                                  headers={"User-Agent": f"{NCBI_TOOL} (biomedical research)"}) as client:
@@ -1325,12 +1491,22 @@ async def verify_citations(text: str) -> dict:
 
     # Second tier: for citations that do exist, does the paper actually concern
     # the claim it was attached to?
+    flagged = []
     for c in cites:
         if c.get("exists") is True:
             ctx = _claim_context(text, c["id"])
             c["support"] = assess_citation_support(ctx, c)
-            c.pop("abstract", None)      # keep the payload small for the client
-            c.pop("mesh", None)
+            if c["support"]["support"] in ("mismatched", "unrelated"):
+                flagged.append((c, ctx))
+    if flagged:
+        async with httpx.AsyncClient(timeout=TIMEOUT,
+                                     headers={"User-Agent": f"{NCBI_TOOL} (biomedical research)"}) as client:
+            await asyncio.gather(*[_second_look(client, c, ctx)
+                                   for c, ctx in flagged[:FULLTEXT_CHECKS]],
+                                 return_exceptions=True)
+    for c in cites:
+        c.pop("abstract", None)          # keep the payload small for the client
+        c.pop("mesh", None)
 
     verified = sum(1 for c in cites if c.get("exists") is True)
     fabricated = sum(1 for c in cites if c.get("exists") is False)
@@ -1363,4 +1539,5 @@ async def verify_citations(text: str) -> dict:
         "miscitation_rate": round(mismatched / judged, 3) if judged else None,
         "truncated": truncated,
         "citations": cites,
+        "checker_version": CHECKER_VERSION,
     }

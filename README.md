@@ -3,8 +3,8 @@
 [![DOI](https://zenodo.org/badge/1289877865.svg)](https://doi.org/10.5281/zenodo.21210783)
 &nbsp;[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-OmniMed is an open-source, AI-powered research assistant that queries **seven large
-language models in parallel** and helps researchers identify therapeutic microRNA (miRNA)
+OmniMed is an open-source, AI-powered research assistant that queries **up to five of 23
+large language models in parallel** and helps researchers identify therapeutic microRNA (miRNA)
 and non-coding RNA (ncRNA) candidates for cardiovascular disease. Researchers compare the
 models side by side, synthesize a consensus answer, and score each model against real
 wet-lab outcomes — building a reliability profile that improves over time.
@@ -18,12 +18,15 @@ Research Grant (2026)**.
 
 ## Highlights
 
-- **Multi-LLM querying** — one question, seven models, answers side by side
-- **Free + Bring-Your-Own-Key** — five models free for everyone; add your own
-  OpenRouter / Anthropic / OpenAI key to unlock unlimited Claude and GPT-4o
-- **Consensus synthesis** — Gemini reads every response and produces one unified conclusion
+- **Multi-LLM querying** — one question, up to five models, answers side by side
+- **Free + Bring-Your-Own-Key** — Gemini, DeepSeek, Qwen, GPT-OSS and Cohere are free; Claude and
+  GPT get 5 messages a day, unlimited with your own Anthropic / OpenAI key
+- **Literature grounding** — per box, give a model papers from PubMed or Europe PMC in a date range
+- **Citation checks** — every PMID, DOI and author–year citation verified (fabricated, off-topic,
+  retracted), using the open full text when the abstract is not enough
+- **Consensus verdict and AI scores** — a separate model ranks candidates by independent evidence,
+  and scores each answer blind to which model wrote it
 - **Wet-lab validation** — score each model 1–10 against experimental results
-- **Live web search** — Claude, GPT-4o, and Gemini search the web for recent literature
 - **Custom prompts** — built-in research prompts plus your own, saved per mode
 - **Document uploads** — PDFs, Word, CSVs, and images reasoned over in-chat
 - **Admin dashboard** — model reliability, token usage & cost, users, and access control
@@ -43,28 +46,36 @@ Research Grant (2026)**.
 
 ### Models
 
-| Model               | Provider    | Web Search | Access                    |
-|---------------------|-------------|:----------:|---------------------------|
-| Gemini 2.5 Flash    | Google      | ✅         | Free                      |
-| DeepSeek V3         | DeepSeek    | —          | Free                      |
-| Llama 3.3 70B       | Groq        | —          | Free                      |
-| Qwen 2.5 72B        | OpenRouter  | —          | Free                      |
-| Command R+          | Cohere      | —          | Free                      |
-| Claude Sonnet 4.6   | Anthropic   | ✅         | 5/day free · key unlocks  |
-| GPT-4o              | OpenAI      | ✅         | 5/day free · key unlocks  |
+23 models from seven providers; any five at a time, like the site's five boxes. The list
+lives in `omnimed-frontend/src/data/models.js` (display) and `omnimed-backend/routes/chat.py`
+(`MODELS`, how each is called). Every id was checked against the provider's live model list.
 
-Claude and GPT-4o each get **5 free messages per user per day** on the project's keys.
+| Provider | Models | Access |
+|---|---|---|
+| Google | Gemini 3.8, 3.7, 3.6, 2.5 Flash | Free |
+| DeepSeek | DeepSeek V4 Pro | Free |
+| Qwen | Qwen 3.8 Flash, 3.8 Max, 3.7 Plus, 3.6 Flash (OpenRouter) · Qwen 3.8 27B (Groq) | Free (OpenRouter needs project credit) |
+| Groq | GPT-OSS 120B | Free |
+| Cohere | Command A+ | Free |
+| Anthropic | Claude Opus 5.5, Sonnet 5.5, Haiku 5.5, Fable 5.1, Opus 5, Sonnet 5 | 5/day free · own key unlocks |
+| OpenAI | GPT-6.1 Sol, GPT-6 Astra, GPT-6 Luna, GPT-5.5, GPT-5.4 mini | 5/day free · own key unlocks |
+
+Claude and GPT models each get **5 free messages per user per day** on the project's keys.
 Beyond that, a user adds their own API key (stored only in their browser) or an admin
-grants them unlimited access.
+grants them unlimited access. Retired models (e.g. Claude Sonnet 4.6, GPT-4o) are no longer
+offered but still named correctly in old chats and statistics.
 
 ---
 
 ## Architecture
 
+The full design (components, data flow, the three validation layers, data model,
+security and limits) is in [docs/SYSTEM_DESIGN.md](docs/SYSTEM_DESIGN.md).
+
 ```
 ┌────────────────┐      REST + SSE        ┌────────────────┐
 │  React (Vite)  │ ─────────────────────► │  Flask backend │
-│                │   /ask  /meta-analysis │                │
+│                │   /ask  /agent/*       │                │
 │  • Chat UI     │   /upload  /admin/*    │  • model fan-out (7 LLMs, parallel)
 │  • Admin panel │                        │  • web search, prompt caching
 │  • Prompt/Key  │                        │  • per-model quota + access gating
@@ -93,25 +104,30 @@ omnimed/
 ├── omnimed-frontend/                # React app
 │   └── src/
 │       ├── pages/                   # Chat, Landing, Login, Admin
-│       │   └── admin/               # Overview, Reliability, Usage, Users, GrantedUsers
+│       │   └── admin/               # Overview, Reliability, Usage, Users, GrantedUsers, ResearchReport
 │       ├── components/              # Sidebar, PromptSelector, ApiKeyModal, Logo
 │       ├── context/AuthContext.jsx  # auth + granted-access state
-│       ├── lib/                     # supabase client, api (SSE), chatStore, apiKeys
-│       └── data/builtinPrompts.js   # built-in system prompts
+│       ├── lib/                     # supabase client, api (SSE), chatStore, apiKeys, verifyStore
+│       └── data/
+│           ├── models.js            # every model offered (and retired ones, for labels)
+│           └── builtinPrompts.js    # selectable system prompts
 │
 └── omnimed-backend/                 # Flask API
-    ├── app.py                       # app factory + blueprint registration
+    ├── app.py                       # app setup + blueprint registration
     ├── routes/
-    │   ├── chat.py                  # /ask — parallel model fan-out (the core)
-    │   ├── compare.py               # /meta-analysis — consensus synthesis
+    │   ├── chat.py                  # /ask — model table, parallel fan-out, literature grounding
+    │   ├── agent.py                 # /agent/council, /agent/score-all — verdict and AI scores
+    │   ├── literature.py            # /literature/* — search, citation and uncited-claim checks
     │   ├── upload.py                # /upload — PDF/Word/CSV/image parsing
-    │   ├── admin.py                 # /admin/granted-users — access control
+    │   ├── admin.py                 # /admin/* — access control, research report
     │   └── auth.py                  # JWT verification decorator
     ├── services/
+    │   ├── literature_service.py    # PubMed / Europe PMC / Crossref / ClinicalTrials.gov
+    │   ├── agent_service.py         # judge and council prompts, reply parsing
     │   ├── supabase_service.py      # data-access layer
-    │   ├── gemini_meta.py           # Gemini synthesis call
-    │   └── pdf_service.py           # document text extraction
-    ├── prompts/biomedical_prompt.txt
+    │   ├── rag_service.py           # document chunking
+    │   ├── embedding_service.py     # embeddings for document search
+    │   └── stats_service.py         # reliability statistics
     └── supabase_setup.sql           # full schema — run once in Supabase
 ```
 
@@ -227,15 +243,11 @@ Fan one question out to several models. Streams each result over Server-Sent Eve
 }
 ```
 
-### `POST /meta-analysis`
-Synthesize every model's answer into one structured consensus.
+### `POST /agent/council`
+One structured verdict across every model's answer to a question: headline, ranked candidates (checked against PubMed and ClinicalTrials.gov), disagreements.
 
-```jsonc
-{
-  "model_responses": { "gemini": "…", "claude": "…" },
-  "model_labels":    { "gemini": "Gemini 2.5 Flash", "claude": "Claude Sonnet 4.6" }
-}
-```
+### `POST /agent/score-all`
+Scores every answer to the latest question with a judge model from a different provider, blind to which model wrote each answer.
 
 ### `POST /upload`
 Multipart file upload (PDF, Word, CSV, image). Returns extracted text used as context.
@@ -247,7 +259,7 @@ Admin-only. List, grant, or revoke unlimited-access users. Guarded by admin emai
 
 ## Access Model
 
-| User                    | Claude / GPT-4o                      |
+| User                    | Claude / GPT models                  |
 |-------------------------|--------------------------------------|
 | Admin                   | Unlimited (backend keys)             |
 | Admin-granted user      | Unlimited (backend keys)             |

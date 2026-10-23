@@ -303,15 +303,21 @@ def parse_judge_reply(text: str) -> dict | None:
         return None
 
     scores = {d: _clamp(obj.get(d)) for d in DIMENSIONS}
-    overall = _clamp(obj.get("overall"))
+    judge_overall = _clamp(obj.get("overall"))
     present = [v for v in scores.values() if v is not None]
 
-    # A judge that returned dimensions but no overall still produced a usable
-    # score; falling back to the mean beats discarding the whole reply.
-    if overall is None:
-        if not present:
-            return None
+    # The overall is the average of the four dimensions, not the judge's own
+    # holistic number. The holistic number drifted from the dimensions it
+    # summarised: an answer that declined to answer scored mechanism 1 and
+    # actionability 3, yet 9/10 overall for its honesty. An average is
+    # reproducible and explainable ("the mean of the four"). The judge's own
+    # figure is kept as judge_overall for the record.
+    if present:
         overall = _clamp(sum(present) / len(present))
+    elif judge_overall is not None:
+        overall = judge_overall
+    else:
+        return None
 
     flags = obj.get("red_flags")
     if isinstance(flags, str):
@@ -321,6 +327,7 @@ def parse_judge_reply(text: str) -> dict | None:
 
     return {
         "overall": overall,
+        "judge_overall": judge_overall,
         "scores": scores,
         "rationale": str(obj.get("rationale") or "").strip()[:600],
         "red_flags": [str(f)[:200] for f in flags[:6]],

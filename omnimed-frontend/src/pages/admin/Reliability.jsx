@@ -5,8 +5,8 @@ import {
 } from 'recharts'
 import * as XLSX from 'xlsx'
 import { supabase } from '../../lib/supabase'
+import { modelLabel } from '../../data/models.js'
 
-const MODEL_LABELS = { claude: 'Claude', gpt4: 'GPT-4o', gemini: 'Gemini', deepseek: 'DeepSeek', groq: 'Groq', qwen: 'Qwen', cohere: 'Cohere' }
 const scoreColor = (avg) => avg >= 7 ? '#22c55e' : avg >= 5 ? '#f59e0b' : '#f87171'
 const PAGE_SIZE = 50
 
@@ -38,7 +38,7 @@ export default function Reliability() {
     ])
     if (rel.error) { setError(rel.error.message); return }
     setChartData((rel.data || []).map(r => ({
-      model: MODEL_LABELS[r.model] || r.model,
+      model: modelLabel(r.model),
       'Avg Score': r.avg_score != null ? parseFloat(Number(r.avg_score).toFixed(1)) : 0,
       total: r.n,
     })))
@@ -89,7 +89,7 @@ export default function Reliability() {
     const { data } = await q
     const out = (data || []).map(r => ({
       Date:           new Date(r.created_at).toLocaleString(),
-      Model:          MODEL_LABELS[r.model] || r.model || '—',
+      Model:          (r.model ? modelLabel(r.model) : '—'),
       Verdict:        r.verdict || '—',
       Notes:          r.researcher_notes || '—',
       'Submitted By': r.submitted_by || '—',
@@ -185,7 +185,7 @@ export default function Reliability() {
               <tbody>
                 {usage.map(u => (
                   <tr key={u.model}>
-                    <td><strong>{MODEL_LABELS[u.model] || u.model || '—'}</strong></td>
+                    <td><strong>{(u.model ? modelLabel(u.model) : '—')}</strong></td>
                     <td>{fmt(u.calls)}</td>
                     <td>{fmt(u.input_tokens)}</td>
                     <td>{fmt(u.output_tokens)}</td>
@@ -231,7 +231,7 @@ export default function Reliability() {
                   {rows.map(row => (
                     <tr key={row.id}>
                       <td style={{ whiteSpace: 'nowrap' }}>{new Date(row.created_at).toLocaleDateString()}</td>
-                      <td><strong>{MODEL_LABELS[row.model] || row.model || '—'}</strong></td>
+                      <td><strong>{(row.model ? modelLabel(row.model) : '—')}</strong></td>
                       <td>
                         {row.verdict ? (
                           <span style={{

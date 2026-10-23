@@ -2,19 +2,11 @@ import { useState, useEffect } from 'react'
 import { KEY_CONFIGS, getKey, setKey, removeKey } from '../lib/apiKeys'
 import './ApiKeyModal.css'
 
-const TABS = [
-  { id: 'openrouter', label: 'OpenRouter (Recommended)' },
-  { id: 'claude',     label: 'Anthropic' },
-  { id: 'gpt4',       label: 'OpenAI' },
-  { id: 'gemini',     label: 'Google (Gemini)' },
-  { id: 'deepseek',   label: 'DeepSeek' },
-  { id: 'groq',       label: 'Groq' },
-  { id: 'qwen',       label: 'Qwen' },
-  { id: 'cohere',     label: 'Cohere' },
-]
+// One tab per key a user can save, straight from KEY_CONFIGS.
+const TABS = Object.entries(KEY_CONFIGS).map(([id, c]) => ({ id, label: c.label }))
 
-export default function ApiKeyModal({ onClose, initialTab = 'openrouter' }) {
-  const [activeTab, setActiveTab] = useState(initialTab)
+export default function ApiKeyModal({ onClose, initialTab = 'claude' }) {
+  const [activeTab, setActiveTab] = useState(KEY_CONFIGS[initialTab] ? initialTab : 'claude')
   const [keyValues, setKeyValues] = useState({})
   const [saved, setSaved]         = useState({})
   const [visible, setVisible]     = useState({})

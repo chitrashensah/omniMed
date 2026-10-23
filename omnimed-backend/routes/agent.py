@@ -28,10 +28,18 @@ agent_bp = Blueprint("agent", __name__)
 # Judging a 600-token prompt is an easy task that every model here can do; what
 # separates them is whether they answer promptly. Measured 2026-10-01:
 # gpt-5.4-mini 2.8s, gemini 2.5 31s, gemini 3.5 and deepseek-flash both >90s.
-JUDGE_PREFERENCE = ("gemini36", "gemini", "gpt54mini", "gemini35",
-                    "deepseek", "deepseek_flash", "qwen36flash", "groq")
+JUDGE_PREFERENCE = ("gemini36", "gemini", "gpt54mini", "groq", "groq_qwen38",
+                    "deepseek_pro", "qwen36flash")
 
-JUDGE_MAX_TOKENS = 700          # a score object and two sentences, nothing more
+# Length of the visible reply we expect: a score object and two sentences
+# (judge), a verdict and up to eight candidates (council). Passed as max_tokens,
+# but it is not the real limit: every caller in chat.py raises it to its
+# provider's floor (8,192 Gemini, 16,000 Claude, 16,384 the others). That is
+# deliberate. The judges are thinking models, and thinking shares this budget;
+# a 700-token ceiling would cut the thinking off before the score is written.
+# Thinking is never disabled or capped below the floor here. A ceiling is not
+# a charge: only what the judge actually writes is billed.
+JUDGE_REPLY_TOKENS = 700
 
 # A model call may wait up to TIMEOUT (300s) in chat.py, which is right for a
 # research answer and far too long for a judge. Scoring a short prompt either
@@ -89,7 +97,7 @@ _TRANSIENT = {"SERVICE_UNAVAILABLE", "RATE_LIMIT", "TIMEOUT", "USAGE_LIMIT",
               "PROVIDER_ERROR", "EMPTY_RESPONSE", "NO_API_KEY", "QUOTA_EXCEEDED"}
 
 
-COUNCIL_MAX_TOKENS = 1600       # a verdict and six candidates, nothing more
+COUNCIL_REPLY_TOKENS = 1600     # see JUDGE_REPLY_TOKENS: raised to the provider floor
 
 
 # A judge that just failed is almost certainly still failing. Without this,
@@ -183,7 +191,7 @@ def council():
 
     try:
         judge, result, failure = asyncio.run(_run_chain(
-            chain, prompt, agent_service.COUNCIL_SYSTEM, COUNCIL_MAX_TOKENS, user_keys))
+            chain, prompt, agent_service.COUNCIL_SYSTEM, COUNCIL_REPLY_TOKENS, user_keys))
     except Exception as e:
         return jsonify({"error": "COUNCIL_FAILED", "message": str(e)[:200]}), 502
 
@@ -252,7 +260,7 @@ def score_all():
             question, answers[probe_key], verifications.get(probe_key))
         judge, res, fail = await _run_chain(preferred, probe_prompt,
                                             agent_service.JUDGE_SYSTEM,
-                                            JUDGE_MAX_TOKENS, user_keys)
+                                            JUDGE_REPLY_TOKENS, user_keys)
         if not res:
             return {k: {"error": (fail or {}).get("error", "JUDGE_FAILED")} for k in answers}
 
@@ -270,7 +278,7 @@ def score_all():
                 try:
                     out = await asyncio.wait_for(
                         _run_model(judge, prompt, agent_service.JUDGE_SYSTEM, "", [], [],
-                                   JUDGE_MAX_TOKENS, user_keys=user_keys, web_search=False),
+                                   JUDGE_REPLY_TOKENS, user_keys=user_keys, web_search=False),
                         timeout=JUDGE_TIMEOUT)
                 except asyncio.TimeoutError:
                     return model_key, {"error": "TIMEOUT", "judge": judge}
@@ -293,79 +301,3 @@ def score_all():
 
     return jsonify({"status": "ok", "scores": scores,
                     "scored": sum(1 for s in scores.values() if "overall" in s)}), 200
-
-
-@agent_bp.route("/agent/score", methods=["POST", "OPTIONS"])
-@require_auth
-def score_answer():
-    data = request.get_json(silent=True) or {}
-    answer = (data.get("answer") or "").strip()
-    question = (data.get("question") or "").strip()
-    scored_model = data.get("model") or ""
-
-    if not answer:
-        return jsonify({"error": "MISSING_ANSWER",
-                        "message": "Provide the 'answer' text to score"}), 400
-
-    # {model: api_key} forwarded from the caller, same shape /ask uses.
-    user_keys = data.get("user_keys") or {}
-
-    chain = _judge_chain(scored_model, data.get("judge"), user_keys)
-    if not chain:
-        return jsonify({"error": "NO_JUDGE_AVAILABLE",
-                        "message": "No judge model is configured"}), 503
-
-    # Layer 1 first: its findings are evidence for the judge, so the judge is
-    # never guessing at whether a PMID resolves.
-    use_verification = data.get("use_verification", True)
-    verification = None
-    if use_verification:
-        try:
-            verification = asyncio.run(lit.verify_citations(answer))
-        except Exception:
-            verification = None
-
-    prompt = agent_service.build_judge_prompt(question, answer, verification)
-
-    async def _judge() -> tuple:
-        last = {"error": "NO_JUDGE_AVAILABLE", "message": "No judge answered"}
-        for key in chain[:4]:
-            try:
-                res = await _run_model(key, prompt, agent_service.JUDGE_SYSTEM, "", [], [],
-                                       JUDGE_MAX_TOKENS, user_keys=user_keys, web_search=False)
-            except Exception as e:
-                last = {"error": "JUDGE_FAILED", "message": str(e)[:200]}
-                continue
-            if res.get("status") == "ok":
-                return key, res, None
-            last = {"error": res.get("error") or "JUDGE_FAILED",
-                    "message": res.get("message") or "The judge model did not answer"}
-            if res.get("error") not in _TRANSIENT:
-                break
-        return None, None, last
-
-    try:
-        judge, result, failure = asyncio.run(_judge())
-    except Exception as e:
-        return jsonify({"error": "JUDGE_FAILED", "message": str(e)[:200]}), 502
-
-    if not result:
-        return jsonify({**failure, "tried": chain[:4]}), 502
-
-    score = agent_service.parse_judge_reply(result.get("text") or "")
-    if not score:
-        # Never invent a score from an unparseable reply — a fabricated number
-        # would flow straight into the reliability statistics.
-        return jsonify({"error": "UNPARSEABLE_SCORE",
-                        "message": "The judge did not return a readable score",
-                        "judge": judge}), 502
-
-    return jsonify({
-        "status": "ok",
-        "ai_score": score,                  # Layer 2 — kept separate…
-        "verification": verification,       # …from Layer 1
-        "judge": judge,
-        "judge_served_model": result.get("served_model"),
-        "saw_verification": bool(verification),
-        "usage": result.get("usage"),
-    }), 200

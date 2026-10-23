@@ -36,3 +36,10 @@ services:
         sync: false
       - key: ADMIN_EMAIL
         sync: false
+      # PubMed asks callers to identify themselves; without NCBI_EMAIL lookups
+      # are anonymous and throttled harder. An NCBI_API_KEY (free) triples the
+      # rate limit for citation checks (3 → 10 requests/s).
+      - key: NCBI_EMAIL
+        sync: false
+      - key: NCBI_API_KEY
+        sync: false
