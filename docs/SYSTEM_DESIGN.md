@@ -320,6 +320,14 @@ erDiagram
 
 ## 10. Known limitations and next steps
 
+- **Admins can read every user's data.** Thirteen row-level policies give the
+  admin emails full access (read *and* write) to all rows — chats, uploaded
+  documents, prompts, scores. Planned (pending discussion with Dr. Chen):
+  a personal dashboard per user (own usage, own reliability statistics, own
+  report); an admin view limited to anonymous aggregates through summary
+  functions; owner-only policies on chats, documents, prompts and chunks; a
+  consent notice for pooling wet-lab scores; and, later, opt-in sharing with a
+  lab.
 - **Validation rows are written by the browser.** RLS limits a user to their own
   rows, but a user could edit their own scores. Moving these writes to the
   backend would make the research data tamper-evident.
