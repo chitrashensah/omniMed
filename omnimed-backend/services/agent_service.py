@@ -33,7 +33,11 @@ RUBRIC = [
 
 DIMENSIONS = [k for k, _ in RUBRIC]
 
-MAX_ANSWER_CHARS = 6_000
+# Research answers run 4-8k characters. At 6,000 the judge saw a 6.9k answer
+# with its middle cut, called it "partially truncated" and scored it 4/10 —
+# penalising the answer for OmniMed's own trimming. 12,000 (≈3k tokens) covers
+# them whole; anything longer is trimmed with a note saying so (_shorten).
+MAX_ANSWER_CHARS = 12_000
 MAX_QUESTION_CHARS = 1_000
 
 JUDGE_SYSTEM = (
@@ -208,7 +212,9 @@ def _shorten(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     head = int(limit * 0.7)
-    return f"{text[:head]}\n\n[…trimmed…]\n\n{text[-(limit - head):]}"
+    return (f"{text[:head]}\n\n[… OmniMed trimmed the middle of this text for length. "
+            f"This is not part of the original; do not count it against the answer …]\n\n"
+            f"{text[-(limit - head):]}")
 
 
 def _locate_json(text: str):
